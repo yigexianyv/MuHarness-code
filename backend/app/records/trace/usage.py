@@ -1,0 +1,325 @@
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from app.models.types import ModelUsage, add_model_usage
+from app.runtime.agent.budget import chargeable_tokens
+from app.runtime.agent.events import AgentEvent, AgentEventType
+
+from .models import RunUsageSummary
+
+_REFLECTION_USAGE_EVENTS = frozenset(
+    {
+        AgentEventType.MEMORY_REFLECTION_COMPLETED,
+        AgentEventType.MEMORY_REFLECTION_FAILED,
+    }
+)
+_MAINTENANCE_USAGE_EVENTS = frozenset(
+    {
+        AgentEventType.MEMORY_MAINTENANCE_COMPLETED,
+        AgentEventType.MEMORY_MAINTENANCE_FAILED,
+    }
+)
+
+
+# 函数说明：summarize_run_usage
+# 用途：生成摘要运行用量，供执行轨迹与用量查询使用。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+# 返回：类型 `RunUsageSummary`；返回 `RunUsageSummary(…)`。
+# 关键调用（按源码出现顺序，实际执行取决于分支）：`_main_agent_usage` →
+# `_context_summary_usage` → `_sum_event_usage` → `_reflection_status` →
+# `_run_budget_snapshot` → `add_model_usage`；另有 3 个调用点。
+def summarize_run_usage(events: Sequence[AgentEvent]) -> RunUsageSummary:
+
+    main_agent = _main_agent_usage(events)
+    context_summary = _context_summary_usage(events)
+    reflection = _sum_event_usage(events, _REFLECTION_USAGE_EVENTS)
+    maintenance = _sum_event_usage(events, _MAINTENANCE_USAGE_EVENTS)
+    reflection_status, reflection_skip_reason = _reflection_status(events)
+    budget = _run_budget_snapshot(events)
+    provider_total = add_model_usage(
+        add_model_usage(
+            add_model_usage(main_agent, context_summary),
+            reflection,
+        ),
+        maintenance,
+    )
+    summary_status, summary_provider, summary_model, summary_duration_ms = (
+        _context_summary_status(events)
+    )
+    return RunUsageSummary(
+        main_agent=main_agent,
+        context_summary=context_summary,
+        memory_reflection=reflection,
+        memory_maintenance=maintenance,
+        provider_total=provider_total,
+        tool_schema_tokens_estimated=sum(
+            event.tool_schema_tokens or 0
+            for event in events
+            if event.type is AgentEventType.MODEL_STARTED
+        ),
+        memory_reflection_status=reflection_status,
+        memory_reflection_skip_reason=reflection_skip_reason,
+        context_summary_status=summary_status,
+        context_summary_provider=summary_provider,
+        context_summary_model=summary_model,
+        context_summary_duration_ms=summary_duration_ms,
+        main_agent_chargeable_tokens=_main_agent_chargeable_tokens(
+            events,
+            fallback=main_agent,
+        ),
+        **budget,
+    )
+
+
+# 函数说明：_run_budget_snapshot
+# 用途：运行预算快照，供执行轨迹与用量查询使用。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+# 返回：类型 `dict[str, object]`；按分支返回 `{}`；
+# `{'run_budget_status': latest.run_budget_status, 'run_budget_reason':…`。
+# 分支与异常：
+#   当 `latest is None` 时，返回 `{}`。
+def _run_budget_snapshot(events: Sequence[AgentEvent]) -> dict[str, object]:
+
+    latest: AgentEvent | None = None
+    for event in events:
+        if event.run_budget_status is not None:
+            latest = event
+    if latest is None:
+        return {}
+    return {
+        "run_budget_status": latest.run_budget_status,
+        "run_budget_reason": latest.run_budget_reason,
+        "run_budget_warning_tokens": latest.run_budget_warning_tokens,
+        "run_budget_finalization_tokens": (
+            latest.run_budget_finalization_tokens
+        ),
+        "run_budget_hard_tokens": latest.run_budget_hard_tokens,
+        "run_budget_warning_model_calls": (
+            latest.run_budget_warning_model_calls
+        ),
+        "run_budget_finalization_model_calls": (
+            latest.run_budget_finalization_model_calls
+        ),
+        "run_budget_hard_model_calls": latest.run_budget_hard_model_calls,
+    }
+
+
+# 函数说明：_main_agent_chargeable_tokens
+# 用途：在执行轨迹与用量查询中处理 `_main_agent_chargeable_tokens`，通过 `values.append`
+#  完成首个内部处理步骤。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+#   fallback：传给 `chargeable_tokens` 的输入，类型 `ModelUsage`。
+# 返回：类型 `int`；按分支返回 `chargeable_tokens(fallback)`；
+# `sum((chargeable_tokens(usage) for usage in values))`。
+# 关键调用（按源码出现顺序，实际执行取决于分支）：`_has_tokens` → `chargeable_tokens`。
+# 分支与异常：
+#   当 `not values` 时，返回 `chargeable_tokens(fallback)`。
+def _main_agent_chargeable_tokens(
+    events: Sequence[AgentEvent],
+    *,
+    fallback: ModelUsage,
+) -> int:
+
+    values: list[ModelUsage] = []
+    for event in events:
+        if event.type is AgentEventType.MODEL_COMPLETED and event.usage is not None:
+            values.append(event.usage)
+        if (
+            event.type is AgentEventType.MODEL_STARTED
+            and event.summary_usage is not None
+            and _has_tokens(event.summary_usage)
+        ):
+            values.append(event.summary_usage)
+    if not values:
+        return chargeable_tokens(fallback)
+    return sum(chargeable_tokens(usage) for usage in values)
+
+
+# 函数说明：_reflection_status
+# 用途：处理执行轨迹与用量查询中的 `_reflection_status` 数据；结果及边界条件见下方说明。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+# 返回：类型 `tuple[str, str | None]`；返回 `(status, skip_reason)`。
+def _reflection_status(events: Sequence[AgentEvent]) -> tuple[str, str | None]:
+    status = "not_run"
+    skip_reason: str | None = None
+    for event in events:
+        if event.type is AgentEventType.MEMORY_REFLECTION_STARTED:
+            status = "running"
+        elif event.type is AgentEventType.MEMORY_REFLECTION_COMPLETED:
+            status = "completed"
+            skip_reason = None
+        elif event.type is AgentEventType.MEMORY_REFLECTION_FAILED:
+            status = "failed"
+            skip_reason = None
+        elif event.type is AgentEventType.MEMORY_REFLECTION_SKIPPED:
+            status = "skipped"
+            skip_reason = event.reflection_skip_reason
+    return status, skip_reason
+
+
+# 函数说明：_main_agent_usage
+# 用途：在执行轨迹与用量查询中处理 `_main_agent_usage`，通过 `terminal_usage.model_copy`
+#  完成首个内部处理步骤。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+# 返回：类型 `ModelUsage`；按分支返回 `usage`；`terminal_usage`；
+# `terminal_usage.model_copy(update={'model_calls': _main_model_call_count(events)})`；
+# `ModelUsage()`。
+# 关键调用（按源码出现顺序，实际执行取决于分支）：`ModelUsage` → `add_model_usage` →
+# `_with_inferred_call` → `_main_model_call_count`。
+# 分支与异常：
+#   当 `completed_calls` 时，返回 `usage`。
+#   当 `event.type not in {AgentEventType.AGENT_COMPLETED,…` 时，跳过当前循环项。
+#   `terminal_usage is not None` 分支在完成前置处理后返回 `terminal_usage.model_copy(…)`
+# 。
+#   当 `terminal_usage.model_calls > 0` 时，返回 `terminal_usage`。
+def _main_agent_usage(events: Sequence[AgentEvent]) -> ModelUsage:
+    usage = ModelUsage()
+    completed_calls = 0
+    for event in events:
+        if event.type is AgentEventType.MODEL_COMPLETED and event.usage is not None:
+            usage = add_model_usage(usage, _with_inferred_call(event.usage))
+            completed_calls += 1
+    if completed_calls:
+        return usage
+
+    terminal_usage: ModelUsage | None = None
+    for event in events:
+        if event.type not in {
+            AgentEventType.AGENT_COMPLETED,
+            AgentEventType.AGENT_FAILED,
+            AgentEventType.AGENT_CANCELLED,
+        }:
+            continue
+        terminal_usage = event.result.usage if event.result is not None else event.usage
+
+    if terminal_usage is not None:
+        if terminal_usage.model_calls > 0:
+            return terminal_usage
+        return terminal_usage.model_copy(
+            update={"model_calls": _main_model_call_count(events)}
+        )
+
+    return ModelUsage()
+
+
+# 函数说明：_main_model_call_count
+# 用途：统计模型调用，供执行轨迹与用量查询使用。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+# 返回：类型 `int`；返回 `sum(…)`。
+def _main_model_call_count(events: Sequence[AgentEvent]) -> int:
+    return sum(
+        event.usage.model_calls or 1
+        for event in events
+        if event.type is AgentEventType.MODEL_COMPLETED and event.usage is not None
+    )
+
+
+# 函数说明：_context_summary_usage
+# 用途：处理执行轨迹与用量查询中的 `_context_summary_usage` 数据；结果及边界条件见下方说
+# 明。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+# 返回：类型 `ModelUsage`；返回 `usage`。
+# 关键调用（按源码出现顺序，实际执行取决于分支）：`ModelUsage` → `add_model_usage` →
+# `_with_inferred_call`。
+def _context_summary_usage(events: Sequence[AgentEvent]) -> ModelUsage:
+    usage = ModelUsage()
+    for event in events:
+        if (
+            event.type is AgentEventType.MODEL_STARTED
+            and event.summary_usage is not None
+        ):
+            usage = add_model_usage(usage, _with_inferred_call(event.summary_usage))
+    return usage
+
+
+# 函数说明：_context_summary_status
+# 用途：处理执行轨迹与用量查询中的 `_context_summary_status` 数据；结果及边界条件见下方
+# 说明。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+# 返回：类型 `tuple[str, str | None, str | None, float]`；返回
+# `(status, provider, model, duration_ms)`。
+# 关键调用（按源码出现顺序，实际执行取决于分支）：`_has_tokens`。
+# 分支与异常：
+#   当 `event.type is not AgentEventType.MODEL_STARTED` 时，跳过当前循环项。
+def _context_summary_status(
+    events: Sequence[AgentEvent],
+) -> tuple[str, str | None, str | None, float]:
+    status = "not_run"
+    provider: str | None = None
+    model: str | None = None
+    duration_ms = 0.0
+    for event in events:
+        if event.type is not AgentEventType.MODEL_STARTED:
+            continue
+        if event.summary_provider is not None:
+            provider = event.summary_provider
+        if event.summary_model is not None:
+            model = event.summary_model
+        if event.summary_duration_ms is not None:
+            duration_ms += event.summary_duration_ms
+        if event.summary_updated:
+            status = "completed"
+        elif event.summary_error is not None:
+            status = "failed"
+        elif event.summary_usage is not None and _has_tokens(event.summary_usage):
+            status = "completed"
+    return status, provider, model, duration_ms
+
+
+# 函数说明：_sum_event_usage
+# 用途：处理执行轨迹与用量查询中的 `_sum_event_usage` 数据；结果及边界条件见下方说明。
+# 参数：
+#   events：事件集合，类型 `Sequence[AgentEvent]`。
+#   event_types：事件输入或配置值，类型 `frozenset[AgentEventType]`。
+# 返回：类型 `ModelUsage`；返回 `usage`。
+# 关键调用（按源码出现顺序，实际执行取决于分支）：`ModelUsage` → `add_model_usage` →
+# `_with_inferred_call`。
+def _sum_event_usage(
+    events: Sequence[AgentEvent],
+    event_types: frozenset[AgentEventType],
+) -> ModelUsage:
+    usage = ModelUsage()
+    for event in events:
+        if event.type in event_types and event.usage is not None:
+            usage = add_model_usage(usage, _with_inferred_call(event.usage))
+    return usage
+
+
+# 函数说明：_with_inferred_call
+# 用途：在执行轨迹与用量查询中处理 `_with_inferred_call`，通过 `usage.model_copy` 完成首
+# 个内部处理步骤。
+# 参数：
+#   usage：模型调用用量统计，类型 `ModelUsage`。
+# 返回：类型 `ModelUsage`；按分支返回 `usage`；
+# `usage.model_copy(update={'model_calls': 1})`。
+# 关键调用（按源码出现顺序，实际执行取决于分支）：`_has_tokens`。
+# 分支与异常：
+#   当 `usage.model_calls > 0 or not _has_tokens(usage)` 时，返回 `usage`。
+def _with_inferred_call(usage: ModelUsage) -> ModelUsage:
+    if usage.model_calls > 0 or not _has_tokens(usage):
+        return usage
+    return usage.model_copy(update={"model_calls": 1})
+
+
+# 函数说明：_has_tokens
+# 用途：返回 `bool(usage.input_tokens or usage.output_tokens or usage.total_tokens)`，提
+# 供 执行轨迹与用量查询 的派生值。
+# 参数：
+#   usage：模型调用用量统计，类型 `ModelUsage`。
+# 返回：类型 `bool`；返回
+# `bool(usage.input_tokens or usage.output_tokens or usage.total_tokens)`。
+def _has_tokens(usage: ModelUsage) -> bool:
+    return bool(usage.input_tokens or usage.output_tokens or usage.total_tokens)
+
+
+__all__ = ["summarize_run_usage"]

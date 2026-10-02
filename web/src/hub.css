@@ -1,0 +1,157 @@
+/* 导航分组（进行中 / 等你处理 / 已验证）、「待处理」和「账本」页面 */
+
+/* ---------------------------------------------------------------- 侧栏分组 */
+.sidebar-nav { gap: 0; }
+.sidebar-group {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0 12px;
+}
+.sidebar-group + .sidebar-group { border-top: 1px solid #343a31; }
+.sidebar-group__label {
+  color: #6f776b;
+  font-size: 8.5px;
+  letter-spacing: .08em;
+  white-space: nowrap;
+}
+/* 有事等你时，这一组的标题和竖线提示出来 */
+.sidebar-group--waiting { position: relative; }
+.sidebar-group--waiting .sidebar-group__label { color: var(--accent); }
+.sidebar-group--waiting::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 12px;
+  bottom: 14px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+/* ---------------------------------------------------------------- 待处理 */
+.inbox { display: grid; gap: 28px; }
+.inbox-section { display: grid; gap: 12px; }
+.inbox-section__header { display: grid; gap: 3px; }
+.inbox-section__header h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+.inbox-section__header p { margin: 0; color: var(--text-tertiary); font-size: 11px; }
+.inbox-section__count {
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  text-align: center;
+}
+.inbox-section__items { display: grid; gap: 10px; }
+.inbox-section__items .approval-card { width: 100%; margin: 0; }
+
+.inbox-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius-surface, 10px);
+  background: var(--surface-raised, #fff);
+}
+.inbox-card--waiting_user { border-left-color: var(--accent); }
+.inbox-card--paused { border-left-color: #c5a66c; }
+.inbox-card--blocked { border-left-color: #c98277; }
+.inbox-card--run { border-left-color: #c5a66c; }
+.inbox-card__body { min-width: 0; flex: 1; display: grid; gap: 4px; }
+.inbox-card__kind { color: var(--text-tertiary); font-size: 10px; letter-spacing: .03em; }
+.inbox-card__body strong {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.inbox-card__body small { color: var(--text-tertiary); font-size: 9.5px; }
+.inbox-card__answer { display: grid; gap: 8px; margin-top: 8px; }
+.inbox-card__answer-form { display: flex; gap: 8px; }
+.inbox-card__answer-form .input { flex: 1; min-width: 0; min-height: 30px; font-size: 12px; }
+
+.inbox-history { margin-top: 32px; border-top: 1px solid var(--border); }
+.inbox-history > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 0;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  list-style: none;
+}
+.inbox-history > summary::-webkit-details-marker { display: none; }
+.inbox-history > summary svg { transition: transform .16s ease; }
+.inbox-history[open] > summary svg { transform: rotate(180deg); }
+.inbox-history .approval-card { width: 100%; margin: 0 0 10px; }
+
+/* ---------------------------------------------------------------- 账本 */
+.ledger-runs { display: grid; gap: 16px; }
+.ledger-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ledger-summary { display: flex; gap: 10px; margin: 0; }
+.ledger-summary__item {
+  min-width: 150px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  column-gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-raised, #fff);
+}
+.ledger-summary__item dt { color: var(--text-secondary); font-size: 11px; }
+.ledger-summary__item dd {
+  margin: 0;
+  color: var(--text);
+  font: 650 20px/1.1 var(--font-mono, ui-monospace, monospace);
+  text-align: right;
+}
+.ledger-summary__item small { grid-column: 1 / -1; color: var(--text-tertiary); font-size: 9.5px; }
+.ledger-summary__item--audited { border-color: #cfdcd4; background: #f3f7f4; }
+.ledger-summary__item--audited dd { color: #3f6f58; }
+
+.ledger-verdict {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+.ledger-verdict--ok { background: #e3eee7; color: #3f6f58; font-weight: 600; }
+.ledger-verdict--bad { background: #f5e7e5; color: var(--danger, #b44a3c); }
+.ledger-verdict--warn { background: #f4eddd; color: var(--warning, #8a6a2a); }
+.ledger-verdict--pending { background: var(--accent-soft); color: var(--accent); }
+/* “未经审计”刻意做成虚线框：这是 Agent 自评，不是验证过的结果 */
+.ledger-verdict--muted { border: 1px dashed var(--border-strong); color: var(--text-tertiary); }
+
+@media (max-width: 760px) {
+  .sidebar-group__label { font-size: 7.5px; letter-spacing: 0; }
+  .sidebar-group--waiting::before { left: -4px; }
+  .ledger-summary { width: 100%; }
+  .ledger-summary__item { flex: 1; min-width: 0; }
+  .inbox-card { flex-direction: column; }
+}
