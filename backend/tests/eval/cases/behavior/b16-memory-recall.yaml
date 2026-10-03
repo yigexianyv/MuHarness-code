@@ -1,0 +1,16 @@
+id: b16-memory-recall
+suite: behavior
+title: 相关历史记忆会被读取并使用
+why: 召回候选只是线索，必须 memory_read 读全文后再用
+tags: [memory]
+setup:
+  memories:
+    - title: Atlas 项目部署窗口
+      summary: Atlas 只能在每周四 22:00 之后部署
+      content: Atlas 项目的生产部署窗口固定为每周四 22:00 之后，其余时间只允许热修复。
+turns:
+  - Atlas 项目一般什么时候可以部署？
+checks:
+  - no_run_errors: true
+  - tool_used: memory_read
+  - answer_has: {all: [周四, "22"]}

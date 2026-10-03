@@ -1,0 +1,49 @@
+id: c01-many-reads
+suite: context
+title: 连续读入大量工具输出后仍能完成任务
+why: 工具结果超出工作预算时，压缩必须保持调用与结果配对，模型请求不能出错
+tags:
+- context
+env:
+  CONTEXT_PREFERRED_INPUT_TOKENS: '20000'
+  CONTEXT_COMPACT_INPUT_TOKENS: '26000'
+timeout_seconds: 600
+setup:
+  files:
+    logs/part-1.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+      head: 关键事实：本次故障编号 INC-7731，根因是数据库连接池上限只有 32。
+    logs/part-2.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-3.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-4.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-5.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-6.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-7.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-8.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+turns:
+- 依次读取 logs/part-1.log 到 logs/part-8.log，8 个文件每个都要读。读完以后告诉我：故障编号是什么，根因是什么？
+checks:
+- no_run_errors: true
+- tool_used:
+    name: read_file
+    min: 8
+- context_compacted: true
+- answer_has:
+    all:
+    - INC-7731
+    - '32'

@@ -1,0 +1,11 @@
+id: b11-no-task
+suite: behavior
+title: 一次性的小请求不建任务
+why: 任务创建门槛太低，简单翻译也会生成任务
+tags: [smoke, task, cost]
+turns:
+  - 把这句话翻译成英文：今天天气很好，我们去公园散步吧。
+checks:
+  - no_run_errors: true
+  - no_tools: true
+  - task_count: 0

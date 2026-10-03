@@ -1,0 +1,3 @@
+name: prompt-v1
+description: 重写前的基础提示词（单段文字版），其余代码与 current 相同
+system_prompt_file: prompts/system-v1.txt

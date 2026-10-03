@@ -1,0 +1,11 @@
+id: b15-memory-save
+suite: behavior
+title: 明确要求记住的项目决定会被保存
+why: 记忆反思过于保守时，用户明确说"记住"也什么都不存
+tags: [memory]
+timeout_seconds: 400
+turns:
+  - 记住：Atlas 项目的前端以后统一用 pnpm 管理依赖，不要再用 npm。
+checks:
+  - no_run_errors: true
+  - memory_saved: {any: [pnpm]}

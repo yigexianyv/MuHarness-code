@@ -1,0 +1,12 @@
+id: b10-task-create
+suite: behavior
+title: 需要跨轮跟踪的目标建一个任务
+why: 多步骤目标不建任务就无法跟进；拆成多个任务又会让状态分散
+tags: [task]
+turns:
+  - 帮我规划一个三周的 Python 入门学习计划，分步骤记录下来，之后我们会按步骤逐步跟进。
+checks:
+  - no_run_errors: true
+  - tool_used: task_create
+  - task_count: {min: 1, max: 1}
+  - task_steps_at_least: 3

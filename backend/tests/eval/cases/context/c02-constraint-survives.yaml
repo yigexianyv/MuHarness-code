@@ -1,0 +1,43 @@
+id: c02-constraint-survives
+suite: context
+title: 压缩之后仍遵守最初的用户约束
+why: 压缩或摘要把用户在开头提的格式要求弄丢
+tags:
+- context
+env:
+  CONTEXT_PREFERRED_INPUT_TOKENS: '20000'
+  CONTEXT_COMPACT_INPUT_TOKENS: '26000'
+timeout_seconds: 600
+setup:
+  files:
+    logs/part-1.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-2.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-3.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-4.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-5.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-6.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-7.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+    logs/part-8.log:
+      line: 2026-09-01T12:00:{i} INFO worker-3 heartbeat ok seq={i} queue=orders latency_ms=12 payload=aGVsbG8gd29ybGQ=
+      lines: 220
+turns:
+- 依次读取 logs/part-1.log 到 logs/part-8.log，8 个文件每个都要读。读完后用一句话概括这些日志，并且回答的最后必须原样加上暗号 ZEBRA-17。
+checks:
+- no_run_errors: true
+- context_compacted: true
+- answer_has:
+  - ZEBRA-17

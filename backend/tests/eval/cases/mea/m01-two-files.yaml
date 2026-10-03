@@ -1,0 +1,25 @@
+id: m01-two-files
+suite: mea
+title: 两步任务经独立审计后完成
+why: 主流程回归：管理者派活、执行者完成、审计者只读验收，全部步骤通过后才算完成
+tags: [mea, smoke]
+timeout_seconds: 1500
+mea:
+  request: 在工作区创建 hello.py（运行后打印 Hello MuHarness）和 README.md（说明如何运行 hello.py）。
+  title: 创建 hello.py 与 README.md
+  goal: 工作区里有可运行的 hello.py，以及说明运行方法的 README.md
+  round_budget: 10
+  steps:
+    - id: s1
+      title: 创建 hello.py
+      acceptance: hello.py 存在，文件中包含 print("Hello MuHarness")
+    - id: s2
+      title: 编写 README.md
+      acceptance: README.md 存在，并写明运行命令 python hello.py
+checks:
+  - mea_status: completed
+  - mea_steps_done: all
+  - file: {path: hello.py, contains: [Hello MuHarness]}
+  - file: {path: README.md, contains: [python hello.py]}
+  - mea_rounds_at_most: 8
+  - mea_no_role_violation: true

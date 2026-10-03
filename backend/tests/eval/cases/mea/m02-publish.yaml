@@ -1,0 +1,23 @@
+id: m02-publish
+suite: mea
+title: 要求发布的交付物在长任务里真正发布
+why: 执行者缺少发布能力或只写文件不发布时，审计应判不通过而不是放行
+tags: [mea, delivery]
+timeout_seconds: 1500
+mea:
+  request: 写一份三条要点的 summary.md，介绍 MuHarness 的长任务模式，并作为交付物发布给我。
+  title: 撰写并发布 summary.md
+  goal: summary.md 已写好并通过 artifact_publish 发布
+  round_budget: 10
+  steps:
+    - id: s1
+      title: 编写 summary.md
+      acceptance: summary.md 存在，包含至少三条以 "- " 开头的要点
+    - id: s2
+      title: 发布 summary.md
+      acceptance: 已调用 artifact_publish 发布 summary.md，成功回执中包含 sha256
+checks:
+  - mea_status: completed
+  - mea_steps_done: all
+  - artifact: {published: true, path_endswith: summary.md}
+  - mea_no_role_violation: true

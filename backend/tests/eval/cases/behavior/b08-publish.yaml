@@ -1,0 +1,11 @@
+id: b08-publish
+suite: behavior
+title: 用户要下载的文件会发布为交付物
+why: 文件写好了但没有发布，用户在界面上拿不到
+tags: [smoke, delivery]
+turns:
+  - 写一份三行的本周工作总结到 report/weekly.md，然后把它发给我下载。
+checks:
+  - no_run_errors: true
+  - tool_order: [write_file, artifact_publish]
+  - artifact: {published: true, path_endswith: weekly.md}

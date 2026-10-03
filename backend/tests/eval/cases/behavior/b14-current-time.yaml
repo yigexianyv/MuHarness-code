@@ -1,0 +1,11 @@
+id: b14-current-time
+suite: behavior
+title: 问时间用时间工具，不去网页搜索
+why: 选错工具：时间问题去搜索网页
+tags: [tools, cost]
+turns:
+  - 现在几点了？
+checks:
+  - no_run_errors: true
+  - tool_used: get_current_time
+  - tool_absent: [web_search, http_request]

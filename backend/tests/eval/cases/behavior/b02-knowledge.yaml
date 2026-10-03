@@ -1,0 +1,12 @@
+id: b02-knowledge
+suite: behavior
+title: 普通知识问答直接回答
+why: 常识问题去搜索或读文件，说明"何时用工具"的规则没生效
+tags: [smoke, cost]
+turns:
+  - 用三句话解释 TCP 三次握手。
+checks:
+  - no_run_errors: true
+  - no_tools: true
+  - answer_has: {any: [SYN, ACK]}
+  - task_count: 0

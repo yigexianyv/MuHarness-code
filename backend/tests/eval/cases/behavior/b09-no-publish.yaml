@@ -1,0 +1,16 @@
+id: b09-no-publish
+suite: behavior
+title: 没有交付物时不发布
+why: 把中间结果或普通查询也发布成交付物，交付列表会被刷屏
+tags: [delivery]
+setup:
+  files:
+    src/main.py: print("hi")
+    src/util.py: "def add(a, b):\n    return a + b\n"
+turns:
+  - 工作区里有哪些文件？
+checks:
+  - no_run_errors: true
+  - tool_used: list_files
+  - artifact: false
+  - answer_has: {all: [main.py, util.py]}

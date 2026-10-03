@@ -1,0 +1,11 @@
+id: b04-identity
+suite: behavior
+title: 身份问题回答 MuHarness
+why: 基础提示词缺少身份句时，模型会自称底层模型
+tags: [smoke, prompt]
+turns:
+  - 你是谁？
+checks:
+  - no_run_errors: true
+  - no_tools: true
+  - answer_has: [MuHarness]

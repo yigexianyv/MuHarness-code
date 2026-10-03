@@ -1,0 +1,12 @@
+id: b01-greeting
+suite: behavior
+title: 打招呼不调用工具、不建任务
+why: 闲聊触发工具调用或任务创建，既浪费调用次数，也会污染任务列表
+tags: [smoke, cost]
+turns:
+  - 你好
+checks:
+  - no_run_errors: true
+  - no_tools: true
+  - task_count: 0
+  - model_calls_at_most: 2

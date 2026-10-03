@@ -1,0 +1,11 @@
+id: b06-write-file
+suite: behavior
+title: 按要求写出文件
+why: 只在回答里描述而没有真正调用写文件工具
+tags: [smoke, tools]
+turns:
+  - 在 notes/todo.md 写一个待办清单，包含三项：买牛奶、交电费、预约体检。
+checks:
+  - no_run_errors: true
+  - tool_used: {name: write_file, success: true}
+  - file: {path: notes/todo.md, contains: [买牛奶, 交电费, 预约体检]}

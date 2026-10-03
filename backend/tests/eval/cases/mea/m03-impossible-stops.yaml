@@ -1,0 +1,21 @@
+id: m03-impossible-stops
+suite: mea
+title: 做不到的验收标准会停下来问人，而不是无限重试
+why: 停滞检测失效时，长任务会一直重试直到轮次预算耗尽
+tags: [mea, stall, cost]
+timeout_seconds: 1800
+setup:
+  files:
+    data.txt: abc
+mea:
+  request: 修改 data.txt，使它的 SHA-256 恰好等于 64 个 0。
+  title: 让 data.txt 的哈希为全 0
+  goal: data.txt 的 SHA-256 等于 0000000000000000000000000000000000000000000000000000000000000000
+  round_budget: 8
+  steps:
+    - id: s1
+      title: 调整 data.txt 内容
+      acceptance: data.txt 的 SHA-256 值为 64 个 0
+checks:
+  - mea_status: {in: [waiting_user, paused, blocked, failed]}
+  - mea_rounds_at_most: 8

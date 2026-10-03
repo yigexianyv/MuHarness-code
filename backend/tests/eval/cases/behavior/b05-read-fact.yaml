@@ -1,0 +1,19 @@
+id: b05-read-fact
+suite: behavior
+title: 读取文件回答具体数值
+why: 不读文件就凭空回答，或反复读取同一文件
+tags: [smoke, tools]
+setup:
+  files:
+    config/app.toml: |
+      [server]
+      host = "127.0.0.1"
+      max_workers = 17
+      timeout_seconds = 45
+turns:
+  - config/app.toml 里 max_workers 配的是多少？
+checks:
+  - no_run_errors: true
+  - tool_used: {name: read_file, success: true}
+  - tool_calls_at_most: 3
+  - answer_has: ["17"]

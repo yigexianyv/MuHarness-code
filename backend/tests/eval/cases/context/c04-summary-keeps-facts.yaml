@@ -1,0 +1,33 @@
+id: c04-summary-keeps-facts
+suite: context
+title: 长对话滚动摘要后仍记得早期事实
+why: 滚动摘要丢掉用户早先给出的关键数字
+tags:
+- context
+- summary
+timeout_seconds: 900
+env:
+  CONTEXT_MAX_UNSUMMARIZED_CONVERSATION_BLOCKS: '4'
+  CONTEXT_KEEP_RECENT_CONVERSATION_BLOCKS: '2'
+turns:
+- 先记一下项目信息：项目代号 AURORA，截止日期 11 月 3 日，预算 4.2 万元。回复“收到”就行。
+- 用一句话解释什么是 CAP 定理。
+- 用一句话解释什么是幂等。
+- 用一句话解释什么是乐观锁。
+- 用一句话解释什么是背压。
+- 用一句话解释什么是雪崩效应。
+- 用一句话解释什么是灰度发布。
+- 回到最开始：项目代号、截止日期和预算分别是多少？
+checks:
+- no_run_errors: true
+- summary_updated: true
+- answer_has:
+    all:
+    - AURORA
+    - '4.2'
+- answer_has:
+    any:
+    - 11 月 3
+    - 11月3
+    - 11月 3
+    - 11 月3

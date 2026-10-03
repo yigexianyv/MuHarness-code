@@ -1,0 +1,5 @@
+name: tight-context
+description: 把工作上下文压到 2 万 Token，放大压缩策略对结果的影响
+env:
+  CONTEXT_PREFERRED_INPUT_TOKENS: "20000"
+  CONTEXT_COMPACT_INPUT_TOKENS: "26000"
