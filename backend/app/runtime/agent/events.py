@@ -155,6 +155,7 @@ class AgentEvent(BaseModel):
     summary_previous_snapshot: dict[str, Any] | None = None
     constraints_possibly_dropped: tuple[str, ...] = ()
     constraints_revision: int | None = Field(default=None, ge=0)
+    request_tool_views: tuple[dict[str, Any], ...] = ()
     run_budget_status: str | None = None
     run_budget_reason: str | None = None
     run_budget_chargeable_tokens: int | None = Field(default=None, ge=0)

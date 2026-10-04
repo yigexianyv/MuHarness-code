@@ -9,13 +9,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
@@ -40,6 +41,12 @@ CREATE TABLE IF NOT EXISTS run_steps (
     task_context_text TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY(run_id, step)
+);
+
+-- 发给模型的工具消息原文，按内容哈希去重（同一段摘录在多步里只存一份）
+CREATE TABLE IF NOT EXISTS run_request_tool_contents (
+    sha256 TEXT PRIMARY KEY,
+    content TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS run_workspace_end (
@@ -74,7 +81,79 @@ class SQLiteRunStepStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._connect() as database:
             await database.executescript(_SCHEMA)
+            cursor = await database.execute("PRAGMA table_info(run_steps)")
+            columns = {row["name"] for row in await cursor.fetchall()}
+            if "request_tools_json" not in columns:
+                await database.execute(
+                    "ALTER TABLE run_steps ADD COLUMN request_tools_json TEXT"
+                )
             await database.commit()
+
+    async def record_request_tools(
+        self,
+        run_id: str,
+        step: int,
+        views: Sequence[dict[str, Any]],
+    ) -> None:
+        """保存这一步请求里每条工具消息的长度信息和发给模型的原文。"""
+        index: list[dict[str, Any]] = []
+        contents: list[tuple[str, str]] = []
+        for view in views:
+            entry = {key: value for key, value in view.items() if key != "content"}
+            content = view.get("content")
+            if isinstance(content, str):
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                entry["content_sha256"] = digest
+                contents.append((digest, content))
+            index.append(entry)
+        async with self._connect() as database:
+            await database.executemany(
+                "INSERT OR IGNORE INTO run_request_tool_contents (sha256, content) "
+                "VALUES (?, ?)",
+                contents,
+            )
+            await database.execute(
+                "UPDATE run_steps SET request_tools_json = ? "
+                "WHERE run_id = ? AND step = ?",
+                (json.dumps(index, ensure_ascii=False), run_id, step),
+            )
+            await database.commit()
+
+    async def request_tool_view(
+        self,
+        run_id: str,
+        step: int,
+        tool_call_id: str,
+    ) -> dict[str, Any] | None:
+        """第 step 步请求里这次工具调用的样子；content 是模型实际收到的原文。"""
+        async with self._connect() as database:
+            cursor = await database.execute(
+                "SELECT request_tools_json FROM run_steps "
+                "WHERE run_id = ? AND step = ?",
+                (run_id, step),
+            )
+            row = await cursor.fetchone()
+            if row is None or not row["request_tools_json"]:
+                return None
+            entry = next(
+                (
+                    item
+                    for item in json.loads(row["request_tools_json"])
+                    if item.get("tool_call_id") == tool_call_id
+                ),
+                None,
+            )
+            if entry is None:
+                return None
+            digest = entry.get("content_sha256")
+            if digest:
+                cursor = await database.execute(
+                    "SELECT content FROM run_request_tool_contents WHERE sha256 = ?",
+                    (digest,),
+                )
+                content_row = await cursor.fetchone()
+                entry["content"] = content_row["content"] if content_row else None
+            return entry
 
     async def record(
         self,
@@ -203,6 +282,7 @@ class RunStepRecorder:
         tool_result_views: Sequence[ToolResultView],
         constraints_revision: int | None,
         task_context_text: str | None,
+        request_tool_views: Sequence[dict[str, Any]] = (),
     ) -> None:
         snapshot_id, snapshot_error = await self._capture()
         try:
@@ -223,6 +303,9 @@ class RunStepRecorder:
                 snapshot_error=snapshot_error,
                 constraints_revision=constraints_revision,
                 task_context_text=task_context_text,
+            )
+            await self._store.record_request_tools(
+                self._run_id, step, request_tool_views
             )
         except Exception:
             return

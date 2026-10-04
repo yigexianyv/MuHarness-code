@@ -7,6 +7,7 @@ import type {
   AgentRunTrace,
   AgentResult,
   Run,
+  RequestToolViewDetail,
   RewindPreview,
   RewindResult,
   RewindStepInfo,
@@ -133,5 +134,18 @@ export async function getRunToolEvidence(
     run_id: runId,
     tool_call_id: toolCallId,
     offset,
+  })
+}
+
+/** 第 step 步请求里模型实际收到的这次工具输出（逐字）。 */
+export async function getRunToolView(
+  runId: string,
+  step: number,
+  toolCallId: string,
+): Promise<RequestToolViewDetail> {
+  return rpcClient.call(RpcMethods.runContextToolView, {
+    run_id: runId,
+    step,
+    tool_call_id: toolCallId,
   })
 }

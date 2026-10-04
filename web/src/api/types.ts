@@ -271,7 +271,32 @@ export interface AgentEvent {
   summary_previous_snapshot?: ConversationSummarySnapshot | null
   constraints_possibly_dropped?: string[]
   constraints_revision?: number | null
+  request_tool_views?: RequestToolView[]
   [key: string]: unknown
+}
+
+/** 某次请求里一次工具调用的三层长度（字符数）。 */
+export interface RequestToolView {
+  tool_call_id: string
+  tool_name: string | null
+  /** 工具实际返回的字符数（完整原文在证据库） */
+  original_chars: number | null
+  /** 执行器保存进消息记录的字符数 */
+  stored_chars: number | null
+  stored_truncated: boolean
+  /** 这次请求是否包含它；false 表示已被摘要替代或移出请求 */
+  included: boolean
+  /** 这次请求里模型实际收到的字符数 */
+  request_chars?: number | null
+  /** 上下文层是否又做了截短（保留开头和结尾） */
+  request_shortened?: boolean
+}
+
+export interface RequestToolViewDetail extends RequestToolView {
+  run_id: string
+  step: number
+  /** 发给模型的工具消息原文（逐字）；未包含时为空 */
+  content?: string | null
 }
 
 /** 滚动摘要的 7 个字段，与后端 RollingConversationSummary 一致。 */

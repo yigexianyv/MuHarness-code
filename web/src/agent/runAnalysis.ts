@@ -1,6 +1,6 @@
 
 
-import type { AgentEvent, ConversationSummarySnapshot, Run } from '../api/types'
+import type { AgentEvent, ConversationSummarySnapshot, RequestToolView, Run } from '../api/types'
 
 export interface ContextBreakdownItem {
   key: 'messages' | 'tool_schemas' | 'tool_results' | 'skills' | 'other'
@@ -9,13 +9,24 @@ export interface ContextBreakdownItem {
   ratio: number
 }
 
-/** 输出过长、模型只收到截短版本的一次工具调用。 */
-export interface TruncatedToolVM {
+/**
+ * 一次工具输出在上下文里发生的变化：
+ * - shortened：本次请求里被上下文层截短（保留开头和结尾）；
+ * - stored_truncated：执行器保存时截短，本次请求原样发出；
+ * - omitted：之前在请求里，这一步起不再包含（已被摘要替代或移出请求）；
+ * - stored_only：只知道执行器截短过，无法确认模型实际收到的版本（旧记录，或之后没有再请求模型）。
+ */
+export interface ToolNoticeVM {
   toolCallId: string
   toolName: string
-  /** 模型实际收到的（截短后的）输出 */
-  modelOutput: string
-  evidenceId: string | null
+  kind: 'shortened' | 'stored_truncated' | 'omitted' | 'stored_only'
+  originalChars: number | null
+  storedChars: number | null
+  requestChars: number | null
+  /** 用哪一步的请求记录查看"模型收到的内容"；null 表示没有请求记录 */
+  viewStep: number | null
+  /** stored_only 时执行器保存的版本 */
+  storedOutput: string | null
 }
 
 export interface ContextStepVM {
@@ -65,8 +76,10 @@ export interface ContextStepVM {
   constraintsPossiblyDropped: string[]
   /** 本步请求实际采用的"必须记住的事项"版本；null 表示未提供。 */
   constraintsRevision: number | null
-  /** 本步工具输出过长被截短的调用（来自实际的工具完成事件）。 */
-  truncatedTools: TruncatedToolVM[]
+  /** 本步请求里每次工具调用的三层长度；旧记录为 null。 */
+  requestTools: RequestToolView[] | null
+  /** 本步新出现的工具输出变化（同一次调用每种变化只提示一次）。 */
+  toolNotices: ToolNoticeVM[]
 }
 
 export interface TraceGroupVM {
@@ -106,7 +119,10 @@ export function mergeRunEvents(
 
 /** 从模型启动事件提取每一步的上下文用量信息。 */
 export function buildContextSteps(events: AgentEvent[]): ContextStepVM[] {
-  const truncatedByStep = collectTruncatedTools(events)
+  return attachToolNotices(buildContextStepsWithoutNotices(events), events)
+}
+
+function buildContextStepsWithoutNotices(events: AgentEvent[]): ContextStepVM[] {
   const pendingByStep = new Map<string, AgentEvent>()
   const completionByStart = new Map<AgentEvent, AgentEvent>()
   for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
@@ -204,32 +220,68 @@ export function buildContextSteps(events: AgentEvent[]): ContextStepVM[] {
         summaryPreviousSnapshot: event.summary_previous_snapshot ?? null,
         constraintsPossiblyDropped: event.constraints_possibly_dropped ?? [],
         constraintsRevision: numberOrNull(event.constraints_revision),
-        truncatedTools: truncatedByStep.get(`${event.run_id}:${event.step}`) ?? [],
+        requestTools: Array.isArray(event.request_tool_views) ? event.request_tool_views : null,
+        toolNotices: [],
       }
     })
 }
 
-/** 按"运行:步骤"汇总被截短的工具输出；同一次工具调用只算一次。 */
-export function collectTruncatedTools(events: AgentEvent[]): Map<string, TruncatedToolVM[]> {
+/** 根据每步请求记录，标出工具输出第一次被截短、第一次不再被包含的步骤。 */
+function attachToolNotices(steps: ContextStepVM[], events: AgentEvent[]): ContextStepVM[] {
+  const notified = new Set<string>()
+  const included = new Set<string>()
+  const requested = new Set<string>()
+  // 同一步可能有多次请求（重试），按位置而不是步骤号回填
+  const order = steps.map((step, index) => ({ step, index })).sort((a, b) => a.step.step - b.step.step || a.index - b.index)
+  const withNotices: ContextStepVM[] = new Array(steps.length)
+  for (const { step, index } of order) {
+    const notices: ToolNoticeVM[] = []
+    for (const view of step.requestTools ?? []) {
+      requested.add(view.tool_call_id)
+      const base = {
+        toolCallId: view.tool_call_id,
+        toolName: view.tool_name ?? '工具',
+        originalChars: view.original_chars,
+        storedChars: view.stored_chars,
+        requestChars: view.request_chars ?? null,
+        viewStep: step.step,
+        storedOutput: null,
+      }
+      if (view.included) {
+        included.add(view.tool_call_id)
+        const kind = view.request_shortened ? 'shortened' : view.stored_truncated ? 'stored_truncated' : null
+        if (kind && !notified.has(`${view.tool_call_id}:changed`)) {
+          notified.add(`${view.tool_call_id}:changed`)
+          notices.push({ ...base, kind })
+        }
+      } else if (included.has(view.tool_call_id) && !notified.has(`${view.tool_call_id}:omitted`)) {
+        notified.add(`${view.tool_call_id}:omitted`)
+        notices.push({ ...base, kind: 'omitted', requestChars: null, viewStep: null })
+      }
+    }
+    withNotices[index] = { ...step, toolNotices: notices }
+  }
+  // 执行器截短过、但没有任何请求记录的调用（旧记录，或之后没有再请求模型）
+  const byStep = new Map<number, ContextStepVM>()
+  for (const step of withNotices) if (!byStep.has(step.step)) byStep.set(step.step, step)
   const seen = new Set<string>()
-  const byStep = new Map<string, TruncatedToolVM[]>()
   for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
     const result = event.tool_result
     if (event.type !== 'tool_completed' || event.step == null || !result?.output_truncated) continue
-    const key = `${event.run_id}:${result.tool_call_id}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    const stepKey = `${event.run_id}:${event.step}`
-    const list = byStep.get(stepKey) ?? []
-    list.push({
+    if (requested.has(result.tool_call_id) || seen.has(result.tool_call_id)) continue
+    seen.add(result.tool_call_id)
+    byStep.get(event.step)?.toolNotices.push({
       toolCallId: result.tool_call_id,
       toolName: result.tool_name,
-      modelOutput: result.output ?? '',
-      evidenceId: result.evidence_id ?? null,
+      kind: 'stored_only',
+      originalChars: null,
+      storedChars: result.output?.length ?? null,
+      requestChars: null,
+      viewStep: null,
+      storedOutput: result.output ?? '',
     })
-    byStep.set(stepKey, list)
   }
-  return byStep
+  return withNotices
 }
 
 export type SummaryFieldKey = keyof ConversationSummarySnapshot

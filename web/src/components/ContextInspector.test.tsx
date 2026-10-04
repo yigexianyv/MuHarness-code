@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 
-import type { AgentEvent, ConversationSummarySnapshot } from '../api/types'
+import type { AgentEvent, ConversationSummarySnapshot, RequestToolView } from '../api/types'
 import ContextInspector, { ToolOutputViewer } from './ContextInspector'
 
 function contextEvent(): AgentEvent {
@@ -230,29 +230,84 @@ describe('工具输出截短', () => {
       output_truncated: partial.truncated ? true : null,
     },
   })
+  const view = (id: string, partial: Partial<RequestToolView>): RequestToolView => ({
+    tool_call_id: id,
+    tool_name: 'read_file',
+    original_chars: 133_021,
+    stored_chars: 20_000,
+    stored_truncated: true,
+    included: true,
+    request_chars: 6_067,
+    request_shortened: true,
+    ...partial,
+  })
 
-  it('根据实际工具完成事件提示截短，并提供两种查看入口', () => {
+  it('三层长度：工具返回 → 执行器保存 → 本次请求', () => {
+    const events = [
+      started({ step: 1, sequence: 1, request_tool_views: [] }),
+      toolCompleted({ sequence: 2, step: 1, id: 'call-long', truncated: true }),
+      started({ step: 2, sequence: 3, request_tool_views: [view('call-long', {})] }),
+      // 之后每步都带着同一段摘录，只在第一次出现时提示
+      started({ step: 3, sequence: 4, request_tool_views: [view('call-long', {})] }),
+    ]
+    const html = render(events, 'c1')
+    // 只在第一次出现（步骤 2）时提示一次
+    expect(html.match(/工具返回 133,021 → 执行器保存 20,000 → 本次请求 6,067 字符/g)).toHaveLength(1)
+    expect(html).toContain('上下文层保留开头和结尾')
+    expect(html).toContain('查看模型收到的内容')
+    expect(html).toContain('查看完整工具原文')
+    // 选中的步骤有工具输出表
+    expect(html).toContain('本次请求中的工具输出')
+    expect(html).toContain('上下文层截短')
+  })
+
+  it('执行器没截短、但上下文层截短的输出也会提示', () => {
+    const events = [
+      started({ step: 1, sequence: 1 }),
+      toolCompleted({ sequence: 2, step: 1, id: 'call-10k', truncated: false }),
+      started({
+        step: 2,
+        sequence: 3,
+        request_tool_views: [view('call-10k', { original_chars: 10_000, stored_chars: 10_000, stored_truncated: false, request_chars: 6_066 })],
+      }),
+    ]
+    const html = render(events, 'c1')
+    expect(html).toContain('工具返回 10,000 → 执行器保存 10,000 → 本次请求 6,066 字符')
+  })
+
+  it('被摘要替代后提示本次请求不包含', () => {
+    const events = [
+      started({ step: 1, sequence: 1, request_tool_views: [view('call-a', { request_shortened: false, stored_truncated: false, original_chars: 50, stored_chars: 50, request_chars: 50 })] }),
+      started({ step: 2, sequence: 2, request_tool_views: [view('call-a', { included: false, request_chars: null, request_shortened: false, stored_truncated: false })] }),
+    ]
+    const html = render(events, 'c1')
+    expect(html).toContain('的输出从这一步起不在请求里')
+    expect(html).toContain('本次请求不包含')
+  })
+
+  it('旧记录只能显示执行器保存的版本，不冒充模型收到的内容', () => {
     const events = [
       started({ step: 1, sequence: 1, prepared_input_tokens: 9_000 }),
       toolCompleted({ sequence: 2, step: 1, id: 'call-long', truncated: true }),
-      // 同一次调用的重复事件只计一次
       toolCompleted({ sequence: 3, step: 1, id: 'call-long', truncated: true }),
-      toolCompleted({ sequence: 4, step: 1, id: 'call-short', truncated: false }),
     ]
     const html = render(events, 'c1')
-    expect(html.match(/输出过长，模型收到截短版本/g)).toHaveLength(1)
-    expect(html).toContain('查看模型收到的内容')
-    expect(html).toContain('查看完整工具原文')
-    // 截短与摘要替代分开显示
-    expect(html).not.toContain('已由摘要替代')
+    expect(html.match(/执行器保存了截短版本/g)).toHaveLength(1)
+    expect(html).toContain('查看执行器保存的版本')
+    expect(html).not.toContain('查看模型收到的内容')
   })
 
-  it('短输出不提示截短', () => {
+  it('短输出不提示', () => {
     const html = render(
-      [started({ step: 1, sequence: 1 }), toolCompleted({ sequence: 2, step: 1, id: 'call-short', truncated: false })],
+      [
+        started({ step: 1, sequence: 1 }),
+        toolCompleted({ sequence: 2, step: 1, id: 'call-short', truncated: false }),
+        started({ step: 2, sequence: 3, request_tool_views: [view('call-short', { original_chars: 5, stored_chars: 5, stored_truncated: false, request_chars: 5, request_shortened: false })] }),
+      ],
       'c1',
     )
-    expect(html).not.toContain('输出过长')
+    expect(html).not.toContain('工具返回 5')
+    expect(html).not.toContain('执行器保存了截短版本')
   })
 })
 
@@ -278,16 +333,19 @@ describe('工具输出查看器', () => {
     expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>下一页/)
   })
 
-  it('模型收到的内容直接显示截短版本，不冒充完整原文', () => {
+  it('模型收到的内容来自这一步的请求记录，逐字显示', () => {
+    const content = '{"output":"HEAD\\n\\n[tool output excerpt: 14000 characters omitted from the middle]\\n\\nTAIL"}'
     const html = renderViewer(
-      <ToolOutputViewer
-        runId="r1"
-        target={{ kind: 'model', tool: { toolCallId: 'c', toolName: 'read_file', modelOutput: 'HEAD…[truncated]', evidenceId: 'abcd' } }}
-        onClose={() => {}}
-      />,
+      <ToolOutputViewer runId="r1" target={{ kind: 'model', step: 2, toolCallId: 'c', toolName: 'read_file' }} onClose={() => {}} />,
+      (client) => client.setQueryData(['run-tool-view', 'r1', 2, 'c'], {
+        run_id: 'r1', step: 2, tool_call_id: 'c', tool_name: 'read_file',
+        original_chars: 133_021, stored_chars: 20_000, stored_truncated: true,
+        included: true, request_chars: 6_067, request_shortened: true, content,
+      }),
     )
-    expect(html).toContain('模型收到的内容（已截短）')
-    expect(html).toContain('HEAD…[truncated]')
+    expect(html).toContain('第 2 步模型收到的内容')
+    expect(html).toContain('工具返回 133,021 → 执行器保存 20,000 → 本次请求 6,067 字符')
+    expect(html).toContain('tool output excerpt: 14000 characters omitted from the middle')
     expect(html).not.toContain('完整工具原文')
   })
 })

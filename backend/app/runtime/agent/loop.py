@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
@@ -808,6 +809,10 @@ class AgentLoop:
                 if prefix_decision == "append":
                     prefix_decision = "rebuild"
                     prefix_rebuild_reason = "request_config_changed"
+            request_tools_in_view = request_tool_views(
+                request_messages,
+                raw_source_messages,
+            )
             summary_fields = _summary_event_fields(
                 before=summary_state_before,
                 after=context_decision.summary_state,
@@ -888,6 +893,10 @@ class AgentLoop:
                     pinned_constraints[1] if pinned_constraints is not None else None
                 ),
                 **summary_fields,
+                request_tool_views=tuple(
+                    {key: value for key, value in view.items() if key != "content"}
+                    for view in request_tools_in_view
+                ),
                 **run_budget_event_fields(budget_decision, budget_config),
             )
             if context_decision.exceeds_input_budget:
@@ -920,6 +929,7 @@ class AgentLoop:
                         ),
                         None,
                     ),
+                    request_tool_views=request_tools_in_view,
                 )
 
             request_prefix_state = RequestPrefixState(
@@ -1320,6 +1330,69 @@ class AgentLoop:
             model_finish_reason=model_finish_reason,
             tool_result_views=tuple(tool_result_views),
         )
+
+
+def _tool_output_chars(content: str | None) -> int | None:
+    """工具消息是 ToolResult 的 JSON；取其中 output 的字符数。"""
+    if content is None:
+        return None
+    try:
+        envelope = json.loads(content)
+    except (ValueError, TypeError):
+        return len(content)
+    if not isinstance(envelope, dict):
+        return len(content)
+    output = envelope.get("output")
+    return len(output) if isinstance(output, str) else 0
+
+
+def request_tool_views(
+    request_messages: Sequence[Message],
+    raw_source_messages: Sequence[Message],
+) -> list[dict[str, Any]]:
+    """本次请求里每次工具调用的实际样子：发给模型的内容和三层长度。
+
+    - original_chars：工具实际返回的字符数（完整原文在证据库）；
+    - stored_chars：执行器保存进消息记录的字符数（第一层上限）；
+    - request_chars：本次请求里模型实际收到的字符数（上下文层可能再截短）；
+    - included=False：这次请求没有包含它（已被摘要替代或移出请求）。
+    content 是发给模型的工具消息原文，只交给检查点保存，不进事件。
+    """
+    sent = {
+        message.tool_call_id: message
+        for message in request_messages
+        if message.role is MessageRole.TOOL and message.tool_call_id
+    }
+    views: list[dict[str, Any]] = []
+    for message in raw_source_messages:
+        if message.role is not MessageRole.TOOL or not message.tool_call_id:
+            continue
+        stored_chars = _tool_output_chars(message.content)
+        original_chars = stored_chars
+        stored_truncated = False
+        try:
+            envelope = json.loads(message.content or "")
+        except (ValueError, TypeError):
+            envelope = None
+        if isinstance(envelope, dict):
+            if isinstance(envelope.get("output_chars"), int):
+                original_chars = envelope["output_chars"]
+            stored_truncated = bool(envelope.get("output_truncated"))
+        request_message = sent.get(message.tool_call_id)
+        view: dict[str, Any] = {
+            "tool_call_id": message.tool_call_id,
+            "tool_name": message.name,
+            "original_chars": original_chars,
+            "stored_chars": stored_chars,
+            "stored_truncated": stored_truncated,
+            "included": request_message is not None,
+        }
+        if request_message is not None:
+            view["request_chars"] = _tool_output_chars(request_message.content)
+            view["request_shortened"] = request_message.content != message.content
+            view["content"] = request_message.content or ""
+        views.append(view)
+    return views
 
 
 def _summary_event_fields(

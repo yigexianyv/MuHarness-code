@@ -4890,3 +4890,8 @@ body.approval-app {
 .fork-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px; margin: 0 0 14px; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--accent-soft); color: var(--text); font-size: 11.5px; }
 .fork-banner__actions { display: flex; gap: 12px; }
 .context-raw__pre { max-height: 420px; margin: 6px 0 0; padding: 8px; overflow: auto; border-radius: var(--radius-control); background: var(--bg-hover); color: var(--text-secondary); font: 10px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.context-tool-table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+.context-tool-table th { padding: 4px 6px 4px 0; color: var(--text-tertiary); font-size: 9.5px; font-weight: 500; text-align: left; }
+.context-tool-table td { padding: 5px 6px 5px 0; border-top: 1px solid var(--border); color: var(--text-secondary); vertical-align: top; }
+.context-tool-table tr.changed td { color: var(--text); }
+.context-tool-table tr.changed td:nth-child(5) { color: var(--warning); }
