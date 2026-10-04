@@ -573,6 +573,31 @@ def _chat_message(message: Message) -> dict[str, Any]:
 # 参数：
 #   tool：目标工具实例，类型 `ToolDefinition`。
 # 返回：类型 `dict[str, Any]`；返回 `result`。
+def _supports_strict_schema(schema: Any) -> bool:
+    """Keep optional fields optional when a schema cannot use strict mode."""
+    if isinstance(schema, list):
+        return all(_supports_strict_schema(item) for item in schema)
+    if not isinstance(schema, dict):
+        return True
+    if schema.get("type") == "object" or "properties" in schema:
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if schema.get("additionalProperties") is not False:
+            return False
+        if not isinstance(required, list) or set(required) != set(properties):
+            return False
+    return all(
+        _supports_strict_schema(value)
+        for key, mapping in schema.items()
+        if key in {"properties", "$defs", "definitions"}
+        for value in mapping.values()
+    ) and all(
+        _supports_strict_schema(schema[key])
+        for key in ("items", "anyOf", "oneOf", "allOf")
+        if key in schema
+    )
+
+
 def _responses_tool(tool: ToolDefinition) -> dict[str, Any]:
     result: dict[str, Any] = {
         "type": "function",
@@ -581,7 +606,7 @@ def _responses_tool(tool: ToolDefinition) -> dict[str, Any]:
         "parameters": tool.parameters,
     }
     if tool.strict is not None:
-        result["strict"] = tool.strict
+        result["strict"] = tool.strict and _supports_strict_schema(tool.parameters)
     return result
 
 
@@ -597,7 +622,7 @@ def _chat_tool(tool: ToolDefinition) -> dict[str, Any]:
         "parameters": tool.parameters,
     }
     if tool.strict is not None:
-        function["strict"] = tool.strict
+        function["strict"] = tool.strict and _supports_strict_schema(tool.parameters)
     return {"type": "function", "function": function}
 
 

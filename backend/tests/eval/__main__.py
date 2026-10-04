@@ -76,6 +76,63 @@ def build_parser() -> argparse.ArgumentParser:
 
     from .v1_cases import CATEGORIES
 
+    v3 = commands.add_parser("v3", help="第三阶段：36项、客观验收与独立回答质量")
+    v3.add_argument("--list", action="store_true")
+    v3.add_argument("--category", action="append", choices=CATEGORIES)
+    v3.add_argument("--case", action="append")
+    v3.add_argument("--split", choices=["all", "dev", "holdout"], default="all")
+    v3.add_argument("--repeat", type=int, choices=range(1, 21), default=3)
+    v3.add_argument("--provider")
+    v3.add_argument("--model")
+    v3.add_argument("--no-stream", action="store_true")
+    v3.add_argument("--api-retries", type=int, choices=range(7), default=3)
+    v3.add_argument("--variant", default="current")
+    v3.add_argument("--baseline", type=Path)
+    v3.add_argument("--out", type=Path)
+    v3.add_argument("--skip-judge", action="store_true")
+    v3.add_argument("--judge-provider")
+    v3.add_argument("--judge-model")
+
+    review = commands.add_parser("v3-review", help="仅对既有完整证据调用质量裁判，不重跑Agent")
+    review.add_argument("source", type=Path)
+    review.add_argument("--out", type=Path, required=True)
+    review.add_argument("--limit", type=int, choices=range(1, 1001))
+    review.add_argument("--judge-provider")
+    review.add_argument("--judge-model")
+    review.add_argument("--prepare-only", action="store_true",
+                        help="只准备本地评审材料，不加载密钥、不调用外部接口")
+    review.add_argument("--api-retries", type=int, choices=range(7), default=3)
+    review.add_argument("--include-calibration-fixtures", action="store_true",
+                        help="加入两个明确标注的假成功负例，仅用于人工校准")
+
+    regrade_v3 = commands.add_parser("v3-regrade", help="复核V3原始证据，保留历史错误")
+    regrade_v3.add_argument("source", type=Path)
+    regrade_v3.add_argument("--out", type=Path, required=True)
+    regrade_v3.add_argument("--verify-missing", action="store_true",
+                            help="原先跳过独立验收时，从哈希匹配的最终文件补跑Docker验收")
+
+    human = commands.add_parser("v3-human-export", help="导出空白真人标注，不显示AI预评分")
+    human.add_argument("source", type=Path)
+    human.add_argument("--out", type=Path, required=True)
+    calibration = commands.add_parser("v3-calibrate", help="核对真人标注和AI评分，输出分歧")
+    calibration.add_argument("source", type=Path)
+    calibration.add_argument("annotations", type=Path)
+    calibration.add_argument("--out", type=Path, required=True)
+
+    experiment = commands.add_parser("v3-experiment", help="M03反思开关单因素真实对照")
+    experiment.add_argument("--repeat", type=int, choices=range(3, 21), default=3)
+    experiment.add_argument("--provider")
+    experiment.add_argument("--model")
+    experiment.add_argument("--api-retries", type=int, choices=range(7), default=3)
+    experiment.add_argument("--no-stream", action="store_true")
+    experiment.add_argument("--out", type=Path, required=True)
+
+    regression = commands.add_parser("v3-regression-capture", help="把真实失败留档为可复现回归合同")
+    regression.add_argument("source", type=Path)
+    regression.add_argument("--case", required=True)
+    regression.add_argument("--attempt", type=int, required=True)
+    regression.add_argument("--out", type=Path, required=True)
+
     v1 = commands.add_parser("v1", help="六分类第一版：12 项、完整证据与独立验收")
     v1.add_argument("--list", action="store_true", help="只列出用例，不调用模型")
     v1.add_argument("--category", action="append", choices=CATEGORIES)
@@ -87,6 +144,33 @@ def build_parser() -> argparse.ArgumentParser:
     v1.add_argument("--api-retries", type=int, choices=range(7), default=3,
                     help="每次模型请求的接口错误追加重试次数（默认 3，可设 0）")
     v1.add_argument("--out", type=Path)
+
+    v2 = commands.add_parser("v2", help="第二阶段：24 项、默认各 3 次、稳定性与回归")
+    v2.add_argument("--list", action="store_true")
+    v2.add_argument("--category", action="append", choices=CATEGORIES)
+    v2.add_argument("--case", action="append")
+    v2.add_argument("--split", choices=["all", "dev", "holdout"], default="all")
+    v2.add_argument("--repeat", type=int, choices=range(1, 21), default=3)
+    v2.add_argument("--provider")
+    v2.add_argument("--model")
+    v2.add_argument("--no-stream", action="store_true")
+    v2.add_argument("--api-retries", type=int, choices=range(7), default=3)
+    v2.add_argument("--variant", default="current")
+    v2.add_argument("--baseline", type=Path, help="显式指定完成的 V2 基线 JSON")
+    v2.add_argument("--out", type=Path)
+
+    v2_compare = commands.add_parser(
+        "v2-compare", help="仅对比两份 V2 报告，不调用模型"
+    )
+    v2_compare.add_argument("base", type=Path)
+    v2_compare.add_argument("candidate", type=Path)
+    v2_compare.add_argument("--out", type=Path, help="对比输出目录")
+
+    v2_regrade = commands.add_parser(
+        "v2-regrade", help="根据完整证据重新评分，不调用模型"
+    )
+    v2_regrade.add_argument("source", type=Path)
+    v2_regrade.add_argument("--out", type=Path, required=True)
 
     listing = commands.add_parser("list", help="列出用例")
     _selection(listing)
@@ -171,6 +255,73 @@ async def _run_variant(args: argparse.Namespace, name: str) -> RunReport:
 #   文件或资源访问：`args.out.write_text`、`path.write_text`。
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command.startswith("v3"):
+        return _main_v3(args)
+    if args.command == "v2-regrade":
+        from .v2 import exit_code as v2_exit_code
+        from .v2_regrade import regrade
+
+        report, folder = regrade(args.source, out=args.out)
+        print(f"复核报告：{folder / 'report.md'}\n回归门槛：{report['gate']['status']}")
+        return v2_exit_code(report)
+    if args.command == "v2-compare":
+        from .v1 import write_json
+        from .v2 import load_report
+        from .v2_report import compare, gate
+        from .v2_report import render_comparison as render_v2_comparison
+
+        base, candidate = load_report(args.base), load_report(args.candidate)
+        comparison = compare(base, candidate)
+        print(render_v2_comparison(comparison))
+        decision = gate(candidate, comparison)
+        print("回归门槛：" + decision["status"])
+        if args.out:
+            args.out.mkdir(parents=True, exist_ok=True)
+            write_json(args.out / "comparison.json", {**comparison, "gate": decision})
+            (args.out / "comparison.md").write_text(
+                render_v2_comparison(comparison), encoding="utf-8"
+            )
+        if decision["status"] == "PASS":
+            return 0
+        return 2 if decision["status"] == "INCOMPLETE" else 1
+    if args.command == "v2":
+        from .v2 import REPORTS_DIR as V2_REPORTS_DIR
+        from .v2 import exit_code as v2_exit_code
+        from .v2 import run_v2
+        from .v2_cases import v2_cases
+
+        known = v2_cases()
+        unknown = set(args.case or ()) - {plan.case.id for plan in known}
+        if unknown:
+            raise SystemExit("未知的 V2 用例：" + ",".join(sorted(unknown)))
+        plans = [plan for plan in known
+                 if (not args.category or plan.category in args.category)
+                 and (not args.case or plan.case.id in args.case)
+                 and (args.split == "all" or plan.split == args.split)]
+        if not plans:
+            raise SystemExit("没有匹配的 V2 用例")
+        if args.list:
+            for plan in plans:
+                needs = "（需要 Docker）" if plan.case.requires else ""
+                print(
+                    f"{plan.case.id}  {plan.category:12s}  {plan.split:7s}  "
+                    f"{plan.case.title}{needs}"
+                )
+            return 0
+        try:
+            report, folder = asyncio.run(run_v2(
+                plans=plans, provider=args.provider, model=args.model,
+                repeat=args.repeat,
+                non_stream=args.no_stream, api_retries=args.api_retries,
+                variant=load_variant(args.variant), baseline=args.baseline,
+                out=args.out or V2_REPORTS_DIR,
+                progress=lambda line: print(line, flush=True),
+            ))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"中文报告：{folder / 'report.md'}\n结构化报告：{folder / 'report.json'}")
+        print("回归门槛：" + report["gate"]["status"])
+        return v2_exit_code(report)
     if args.command == "v1":
         from .v1 import REPORTS_DIR as V1_REPORTS_DIR
         from .v1 import exit_code, run_v1
@@ -243,6 +394,74 @@ def main(argv: list[str] | None = None) -> int:
     path.write_text(render_comparison(base, other), encoding="utf-8")
     print(f"对照：{path}")
     return 0
+
+
+def _main_v3(args) -> int:
+    from .v1 import write_json
+    from .v3 import REPORTS_DIR as V3_REPORTS_DIR
+    from .v3 import exit_code as v3_exit_code
+    from .v3 import run_v3
+
+    if args.command == "v3-human-export":
+        from .v3_calibration import export_annotations
+        data = export_annotations(args.source, args.out)
+        print(f"空白真人标注：{args.out}，{len(data['samples'])}条")
+        return 0
+    if args.command == "v3-regrade":
+        from .v3_regrade import regrade
+        report, folder = asyncio.run(regrade(args.source, out=args.out, verify_missing=args.verify_missing))
+        print(f"V3复核：{folder / 'report.md'}，{report['summary']['status_counts']}")
+        return v3_exit_code(report)
+    if args.command == "v3-calibrate":
+        from .v3_calibration import calibrate
+        result = calibrate(args.source, args.annotations)
+        write_json(args.out, result)
+        print(f"校准状态：{result['status']}，真人样本：{result['labeled_samples']}")
+        return 0 if result["status"] == "CALIBRATED_SMALL_SAMPLE" else 2
+    if args.command == "v3-regression-capture":
+        from .v3_regression import capture
+        capture(args.source, case_id=args.case, attempt=args.attempt, out=args.out)
+        print(f"原始失败及最小回归合同：{args.out}")
+        return 0
+    if args.command == "v3-experiment":
+        from .v3_experiment import run_experiment
+        result, folder = asyncio.run(run_experiment(out=args.out, repeat=args.repeat,
+            provider=args.provider, model=args.model, api_retries=args.api_retries, non_stream=args.no_stream))
+        print(f"对照结果：{folder / 'experiment.json'}，{result['status']}")
+        return 0 if result["status"] == "COMPARABLE" else 2
+    if args.command == "v3-review":
+        from .v3_judge import LocalPreparationJudge, QualityJudge, review_report
+        async def review_existing():
+            judge = (LocalPreparationJudge() if args.prepare_only else
+                     QualityJudge(provider=args.judge_provider, model=args.judge_model, api_retries=args.api_retries))
+            try:
+                return await review_report(args.source, out=args.out, judge=judge, limit=args.limit,
+                                           include_calibration_fixtures=args.include_calibration_fixtures)
+            finally:
+                await judge.close()
+        asyncio.run(review_existing())
+        print(f"质量评审：{args.out / 'quality-report.json'}；未人工校准")
+        return 2
+    from .v3_cases import v3_cases
+    known = v3_cases()
+    unknown = set(args.case or ()) - {p.case.id for p in known}
+    if unknown:
+        raise SystemExit("未知V3用例：" + ",".join(sorted(unknown)))
+    plans = [p for p in known if (not args.case or p.case.id in args.case)
+             and (not args.category or p.category in args.category)
+             and (args.split == "all" or p.split == args.split)]
+    if not plans:
+        raise SystemExit("没有匹配V3用例")
+    if args.list:
+        for plan in plans:
+            print(f"{plan.case.id}  {plan.category:12s}  {plan.split:7s}  {plan.case.title}")
+        return 0
+    report, folder = asyncio.run(run_v3(plans=plans, provider=args.provider, model=args.model,
+        repeat=args.repeat, non_stream=args.no_stream, api_retries=args.api_retries,
+        variant=load_variant(args.variant), baseline=args.baseline, out=args.out or V3_REPORTS_DIR,
+        skip_judge=args.skip_judge, judge_provider=args.judge_provider, judge_model=args.judge_model))
+    print(f"V3报告：{folder / 'report.md'}\n客观门槛：{report['objective_gate']['status']}\n整体：{report['gate']['status']}")
+    return v3_exit_code(report)
 
 
 if __name__ == "__main__":
