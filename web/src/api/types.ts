@@ -289,6 +289,60 @@ export interface ConversationConstraints {
   updated_at: string | null
 }
 
+export interface RewindStepInfo {
+  step: number
+  message_count: number
+  has_snapshot: boolean
+  snapshot_error: string | null
+  rewindable: boolean
+  reason: string | null
+}
+
+export interface RewindFileChange {
+  path: string
+  /** restore：恢复为该步之前的内容；delete：该步之后新建，将被删除 */
+  action: 'restore' | 'delete'
+  changed_after_run: boolean
+}
+
+export interface IrreversibleOperation {
+  step: number | null
+  tool: string
+  summary: string
+  note: string
+}
+
+export interface RewindPreview {
+  preview_id: string
+  run_id: string
+  step: number
+  files: RewindFileChange[]
+  skipped_files: string[]
+  irreversible: IrreversibleOperation[]
+  blocked_reason: string | null
+}
+
+export interface RewindResult {
+  rewind_key: string
+  run_id: string
+  step: number
+  conversation_id: string
+  draft: string
+  files_restored: number
+  files_deleted: number
+  status: string
+}
+
+/** 由"重做此步"创建的分支会话的来源。 */
+export interface ConversationFork {
+  conversation_id: string
+  source_conversation_id: string
+  source_run_id: string
+  source_step: number
+  rewind_key: string
+  undone: boolean
+}
+
 export interface RunContextMessage {
   index: number
   message: Message

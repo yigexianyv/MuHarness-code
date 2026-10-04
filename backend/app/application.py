@@ -102,12 +102,15 @@ from app.runtime.mea import (
     SQLiteMeaStore,
 )
 from app.runtime.mea.approvals import SandboxAutoApproveGate
+from app.runtime.mea.models import MeaStatus
 from app.runtime.mea.runtimes import (
     ROLE_SYSTEM_PROMPT,
     MeaSettings,
     RoleLimits,
     role_limits,
 )
+from app.runtime.rewind import SQLiteRunStepStore, WorkspaceSnapshotStore
+from app.runtime.rewind.service import RewindService
 from app.runtime.run import (
     RunManager,
     RunStatus,
@@ -452,6 +455,7 @@ class Application:
         self.runtime: AgentRuntime | None = None
         self.run_store: SQLiteRunStore | None = None
         self.run_message_store: SQLiteRunMessageStore | None = None
+        self.rewind_service: RewindService | None = None
         self.run_manager: RunManager | None = None
         self.conversation_service: ConversationService | None = None
         self.conversation_lifecycle: ConversationLifecycleService | None = None
@@ -500,6 +504,19 @@ class Application:
         await checkpoint_store.initialize()
         run_message_store = SQLiteRunMessageStore(database)
         await run_message_store.initialize()
+        run_step_store = SQLiteRunStepStore(database)
+        await run_step_store.initialize()
+        workspace_snapshots = WorkspaceSnapshotStore(
+            database,
+            self.workspace_root,
+            exclude_paths=_data_paths_inside(
+                self.workspace_root,
+                database.parent,
+                self.tasks_dir,
+                self.memory_dir or DEFAULT_MEMORY_DIR,
+            ),
+        )
+        await workspace_snapshots.initialize()
         rule_store = SQLitePermissionRuleStore(database)
         await rule_store.initialize()
         policy_engine = PermissionPolicyEngine(rule_store)
@@ -688,6 +705,8 @@ class Application:
             run_budget_config=self._run_budget_config,
             run_message_store=run_message_store,
             constraints_provider=conversation_store.constraints_for_request,
+            run_step_store=run_step_store,
+            workspace_snapshots=workspace_snapshots,
         )
 
         run_store = SQLiteRunStore(database)
@@ -826,6 +845,26 @@ class Application:
         )
         reconciled_meas = await mea_runner.reconcile()
 
+        async def active_work() -> str | None:
+            for status in (RunStatus.RUNNING, RunStatus.PENDING):
+                if await run_store.list_runs(status=status, limit=1):
+                    return "有执行正在进行，请等它结束（或停止）后再回退"
+            for mea_status in (MeaStatus.RUNNING, MeaStatus.FINALIZING):
+                if await mea_store.list_runs(status=mea_status, limit=1):
+                    return "有长任务正在推进，请先暂停或等它结束后再回退"
+            return None
+
+        rewind_service = RewindService(
+            database,
+            conversation_store=conversation_store,
+            run_lookup=run_store.get,
+            run_message_store=run_message_store,
+            step_store=run_step_store,
+            snapshots=workspace_snapshots,
+            active_work=active_work,
+        )
+        await rewind_service.initialize()
+
         automation_store = SQLiteAutomationStore(database)
         automation_scheduler = AutomationScheduler(
             automation_store,
@@ -851,6 +890,7 @@ class Application:
             mea_runner=mea_runner,
             mea_store=mea_store,
             run_message_store=run_message_store,
+            rewind_service=rewind_service,
         )
 
         self.conversation_store = conversation_store
@@ -859,6 +899,7 @@ class Application:
         self.trace_store = trace_store
         self.checkpoint_store = checkpoint_store
         self.run_message_store = run_message_store
+        self.rewind_service = rewind_service
         self.rule_store = rule_store
         self.policy_engine = policy_engine
         self.approval_store = approval_store

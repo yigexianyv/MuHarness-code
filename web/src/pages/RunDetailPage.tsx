@@ -7,6 +7,7 @@ import { buildTurnView, formatDuration, formatTokens, humanizeRunError } from '.
 import ArtifactList from '../components/ArtifactList'
 import ContextInspector from '../components/ContextInspector'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import ExecutionTimeline from '../components/ExecutionTimeline'
 import ExecutionTrace from '../components/ExecutionTrace'
 import { Icon } from '../components/Icon'
 import { ErrorState, LoadingState } from '../components/PageStates'
@@ -20,10 +21,13 @@ export default function RunDetailPage({
   runId,
   onBack,
   onOpenConversation,
+  onRewound,
 }: {
   runId: string
   onBack: () => void
   onOpenConversation: (conversationId: string) => void
+  /** "重做此步"完成后：打开分支会话，纠正内容预填在输入框里。 */
+  onRewound?: (conversationId: string, draft: string) => void
 }): React.JSX.Element {
   const queryClient = useQueryClient()
   const [confirmCancel, setConfirmCancel] = useState(false)
@@ -103,6 +107,11 @@ export default function RunDetailPage({
               <section className="run-detail-section">
                 <div className="section-heading"><div><h2>模型用量</h2><p>主任务、运行后处理、缓存与模型提供商总用量</p></div></div>
                 <UsageInspector summary={traceQuery.data?.usage} />
+              </section>
+
+              <section className="run-detail-section">
+                <div className="section-heading"><div><h2>执行时间线</h2><p>每一步做了什么；选错的那一步可以"重做此步"，改个决策重新执行</p></div></div>
+                <ExecutionTimeline runId={runId} events={events} onRewound={onRewound} />
               </section>
 
               <section className="run-detail-section">

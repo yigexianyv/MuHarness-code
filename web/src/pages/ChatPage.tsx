@@ -42,6 +42,7 @@ import Composer from '../components/Composer'
 import type { ComposerCommand } from '../components/Composer'
 import ConversationList from '../components/ConversationList'
 import CurrentTaskPanel from '../components/CurrentTaskPanel'
+import ForkBanner from '../components/ForkBanner'
 import LiveAgentTurn from '../components/LiveAgentTurn'
 import MeaPanel from '../components/MeaPanel'
 import MessageList from '../components/MessageList'
@@ -795,7 +796,19 @@ export default function ChatPage({
                   : selectedId === null ? <button type="button" className="btn btn-primary" disabled={newConversationMutation.isPending} onClick={() => newConversationMutation.mutate()}>创建会话</button> : null}
               </section>
             ) : (
-              <MessageList messages={displayMessages} />
+              <>
+                {conversationQuery.data?.fork && conversationQuery.data.fork.conversation_id === selectedId ? (
+                  <ForkBanner
+                    fork={conversationQuery.data.fork}
+                    sourceTitle={conversations.find((item) => item.id === conversationQuery.data?.fork?.source_conversation_id)?.title ?? null}
+                    onOpenSource={(conversationId) => {
+                      selectConversation(conversationId)
+                      onConversationChange?.(conversationId)
+                    }}
+                  />
+                ) : null}
+                <MessageList messages={displayMessages} />
+              </>
             )}
 
             {showAgentTurn ? (

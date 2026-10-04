@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.runtime.rewind.service import RewindConflict, RewindError, RewindService
 from app.runtime.run import RunStatus, history_sha256
 
 from ..dispatcher import RpcContext, RpcDispatcher
@@ -264,6 +265,83 @@ async def run_context_messages(
     }
 
 
+def _rewind_service(ctx: RpcContext) -> RewindService:
+    service = ctx.application.rewind_service
+    if service is None:
+        raise JsonRpcError(INVALID_STATE, "rewind service is not ready")
+    return service
+
+
+def _require_step(params: dict[str, Any]) -> int:
+    step = params.get("step")
+    if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+        raise JsonRpcError(RpcErrorCode.INVALID_PARAMS, "step must be >= 1")
+    return step
+
+
+async def run_steps_list(params: dict[str, Any], ctx: RpcContext) -> dict[str, Any]:
+    """每一步的检查点，以及能否从这一步重做（不能时给出原因）。"""
+    run_id = _require_str(params, "run_id")
+    steps = await _rewind_service(ctx).list_steps(run_id)
+    return {"run_id": run_id, "steps": steps}
+
+
+async def run_rewind_preview(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """只读：回到第 N 步之前会恢复、删除哪些文件，哪些操作不会回退。"""
+    run_id = _require_str(params, "run_id")
+    step = _require_step(params)
+    try:
+        preview = await _rewind_service(ctx).preview(run_id, step)
+    except RewindError as exc:
+        raise JsonRpcError(INVALID_STATE, str(exc)) from exc
+    return {"preview": preview}
+
+
+async def run_rewind_apply(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """恢复文件并新建分支会话；同一个 rewind_key 只生效一次。"""
+    run_id = _require_str(params, "run_id")
+    step = _require_step(params)
+    preview_id = _require_str(params, "preview_id")
+    rewind_key = _require_str(params, "rewind_key")
+    correction = params.get("correction")
+    if not isinstance(correction, str):
+        raise JsonRpcError(RpcErrorCode.INVALID_PARAMS, "correction must be a string")
+    try:
+        result = await _rewind_service(ctx).apply(
+            run_id=run_id,
+            step=step,
+            preview_id=preview_id,
+            correction=correction,
+            rewind_key=rewind_key,
+        )
+    except RewindConflict as exc:
+        raise JsonRpcError(
+            INVALID_STATE, str(exc), {"reason": "preview_outdated"}
+        ) from exc
+    except RewindError as exc:
+        raise JsonRpcError(INVALID_STATE, str(exc)) from exc
+    return {"rewind": result}
+
+
+async def run_rewind_undo(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """把工作区文件恢复到回退之前；分支会话保留。"""
+    rewind_key = _require_str(params, "rewind_key")
+    try:
+        result = await _rewind_service(ctx).undo(rewind_key)
+    except RewindError as exc:
+        raise JsonRpcError(INVALID_STATE, str(exc)) from exc
+    return {"rewind": result}
+
+
 def _require_str(params: dict[str, Any], key: str) -> str:
     value = params.get(key)
     if not isinstance(value, str) or not value:
@@ -305,3 +383,7 @@ def register(dispatcher: RpcDispatcher) -> None:
     dispatcher.register("run.interrupt", run_interrupt)
     dispatcher.register("run.recover", run_recover)
     dispatcher.register("run.context.messages", run_context_messages)
+    dispatcher.register("run.steps.list", run_steps_list)
+    dispatcher.register("run.rewind.preview", run_rewind_preview)
+    dispatcher.register("run.rewind.apply", run_rewind_apply)
+    dispatcher.register("run.rewind.undo", run_rewind_undo)

@@ -4864,3 +4864,28 @@ body.approval-app {
     font-size: 25px;
   }
 }
+
+/* 执行时间线与"重做此步" */
+.exec-timeline { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--border); }
+.exec-timeline > li { display: grid; grid-template-columns: 56px minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.exec-timeline__step { color: var(--text-secondary); }
+.exec-timeline__label { overflow: hidden; color: var(--text); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.exec-timeline__outcome { color: var(--text-tertiary); font-size: 10.5px; white-space: nowrap; }
+.exec-timeline__outcome.ok { color: var(--success); }
+.exec-timeline__outcome.failed { color: var(--danger); }
+.rewind-dialog { width: min(100%, 620px); max-height: 86vh; overflow-y: auto; }
+.rewind-dialog section { margin-top: 14px; }
+.rewind-dialog h4 { margin: 0 0 6px; color: var(--text); font-size: 11px; font-weight: 650; }
+.rewind-dialog__lead { margin: 6px 0 0; color: var(--text-secondary); font-size: 11.5px; line-height: 1.55; }
+.rewind-dialog__files,
+.rewind-dialog__ops { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 10.5px; line-height: 1.5; }
+.rewind-dialog__files li { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 10px; }
+.rewind-dialog__files .mono { overflow-wrap: anywhere; color: var(--text); }
+.rewind-dialog__files span:last-child { color: var(--text-secondary); }
+.rewind-dialog__warn { color: var(--warning); font-style: normal; }
+.rewind-dialog__ops li { display: grid; gap: 1px; }
+.rewind-dialog__ops .mono { overflow-wrap: anywhere; color: var(--text); }
+.rewind-dialog__ops small { color: var(--text-tertiary); font-size: 9.5px; }
+.rewind-dialog textarea { width: 100%; font-size: 11.5px; resize: vertical; }
+.fork-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px; margin: 0 0 14px; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-control); background: var(--accent-soft); color: var(--text); font-size: 11.5px; }
+.fork-banner__actions { display: flex; gap: 12px; }

@@ -87,6 +87,7 @@ class ConversationLifecycleService:
         mea_runner: Any | None = None,
         mea_store: Any | None = None,
         run_message_store: Any | None = None,
+        rewind_service: Any | None = None,
     ) -> None:
         self._conversation_store = conversation_store
         self._operations = operation_coordinator
@@ -104,6 +105,7 @@ class ConversationLifecycleService:
         self._mea_runner = mea_runner
         self._mea_store = mea_store
         self._run_message_store = run_message_store
+        self._rewind_service = rewind_service
 
     # 函数说明：ConversationLifecycleService.delete
     # 用途：先停止会话相关运行，再删除消息及其关联资源。
@@ -225,6 +227,11 @@ class ConversationLifecycleService:
                 if self._mea_store is not None
                 else 0
             )
+            if self._rewind_service is not None:
+                await self._rewind_service.delete_for_conversation(
+                    normalized,
+                    run_ids=run_ids,
+                )
             if self._run_message_store is not None:
                 await self._run_message_store.delete_for_conversation(
                     normalized,
