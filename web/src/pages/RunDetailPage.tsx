@@ -111,8 +111,12 @@ export default function RunDetailPage({
               </section>
 
               <section className="run-detail-section">
-                <div className="section-heading"><div><h2>上下文</h2><p>查看每一步的模型输入与压缩情况</p></div></div>
-                <ContextInspector events={events} />
+                <div className="section-heading"><div><h2>上下文</h2><p>查看每一步的用量、压缩、摘要和被替代的原文，并维护必须记住的事项</p></div></div>
+                <ContextInspector
+                  events={events}
+                  runId={runId}
+                  conversationId={(run.source ?? '').startsWith('mea:') ? null : run.conversation_id}
+                />
               </section>
 
               <RunArtifactsSection artifacts={artifactsQuery.data ?? []} />

@@ -2,12 +2,15 @@
 
 import { describe, expect, it } from 'vitest'
 
-import type { AgentEvent, Run } from '../api/types'
+import type { AgentEvent, ConversationSummarySnapshot, Run } from '../api/types'
 import {
   buildContextSteps,
   buildTraceGroups,
+  diffSummary,
+  effectiveSummary,
   latestRunId,
   mergeRunEvents,
+  newlyCoveredRange,
 } from './runAnalysis'
 
 function event(partial: Partial<AgentEvent>): AgentEvent {
@@ -172,5 +175,70 @@ describe('trace', () => {
     }
     expect(latestRunId([newest, base])).toBe('newest')
     expect(latestRunId([])).toBeNull()
+  })
+})
+
+function snapshot(partial: Partial<ConversationSummarySnapshot>): ConversationSummarySnapshot {
+  return {
+    current_objective: null,
+    user_constraints: [],
+    key_decisions: [],
+    completed_work: [],
+    current_state: [],
+    pending_work: [],
+    important_facts: [],
+    ...partial,
+  }
+}
+
+describe('上下文透明度', () => {
+  const baseline = snapshot({ current_objective: '修复分页', user_constraints: ['只改 backend', '不要改数据库'] })
+  const compacted = snapshot({ current_objective: '修复分页', user_constraints: ['只改 backend'], completed_work: ['定位到 export.py'] })
+  const steps = buildContextSteps([
+    event({ event_id: 'a', sequence: 1, step: 1, summary_snapshot: baseline, summary_covered_before: 4, summary_covered_after: 4, constraints_revision: 1, source_message_count: 9 }),
+    event({ event_id: 'b', sequence: 2, step: 2, summary_covered_before: 4, summary_covered_after: 4, constraints_revision: 1 }),
+    event({
+      event_id: 'c',
+      sequence: 3,
+      step: 3,
+      summary_updated: true,
+      summary_snapshot: compacted,
+      summary_previous_snapshot: baseline,
+      summary_covered_before: 4,
+      summary_covered_after: 28,
+      constraints_possibly_dropped: ['不要改数据库'],
+      constraints_revision: 2,
+    }),
+  ])
+
+  it('解析覆盖范围、约束版本和可能丢失的约束', () => {
+    expect(steps.map((step) => step.constraintsRevision)).toEqual([1, 1, 2])
+    expect(steps[0].sourceMessageCount).toBe(9)
+    expect(newlyCoveredRange(steps[0])).toBeNull()
+    expect(newlyCoveredRange(steps[2])).toEqual({ from: 4, to: 28 })
+    expect(steps[2].constraintsPossiblyDropped).toEqual(['不要改数据库'])
+  })
+
+  it('所选步骤沿用之前最近一次的摘要快照', () => {
+    expect(effectiveSummary(steps, 2)).toEqual({ snapshot: baseline, fromStep: 1 })
+    expect(effectiveSummary(steps, 3)?.fromStep).toBe(3)
+    expect(effectiveSummary(buildContextSteps([event({})]), 1)).toBeNull()
+  })
+
+  it('按字段对比两版摘要', () => {
+    const diff = diffSummary(baseline, compacted)
+    const constraints = diff.find((field) => field.key === 'user_constraints')!
+    expect(constraints.kept).toEqual(['只改 backend'])
+    expect(constraints.removed).toEqual(['不要改数据库'])
+    expect(diff.find((field) => field.key === 'completed_work')!.added).toEqual(['定位到 export.py'])
+    expect(diff.find((field) => field.key === 'current_objective')!.kept).toEqual(['修复分页'])
+  })
+
+  it('旧事件没有新字段时保持兼容', () => {
+    const [legacy] = buildContextSteps([event({})])
+    expect(legacy.coveredBefore).toBeNull()
+    expect(legacy.summarySnapshot).toBeNull()
+    expect(legacy.constraintsPossiblyDropped).toEqual([])
+    expect(legacy.constraintsRevision).toBeNull()
   })
 })

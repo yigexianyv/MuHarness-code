@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from app.domain.memory import (
@@ -59,11 +59,17 @@ from .events import (
     CompositeEventHandler,
     NullEventHandler,
 )
-from .loop import AgentLoop
+from .loop import AgentLoop, ConstraintsProvider
 from .memory_post_run import PostRunMemoryCoordinator
 from .result import (
     AgentResult,
 )
+
+if TYPE_CHECKING:
+    from app.runtime.run.messages_store import (
+        RunMessageRecorder,
+        SQLiteRunMessageStore,
+    )
 
 
 class AgentRuntime:
@@ -147,6 +153,8 @@ class AgentRuntime:
         tool_output_recorder: ToolOutputRecorder | None = None,
         post_run_submit: Callable[..., bool] | None = None,
         run_budget_config: RunBudgetConfig | None = None,
+        run_message_store: SQLiteRunMessageStore | None = None,
+        constraints_provider: ConstraintsProvider | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -170,6 +178,7 @@ class AgentRuntime:
         )
         self._context_manager = context_manager or ContextManager()
         self._checkpoint_store = checkpoint_store
+        self._run_message_store = run_message_store
         self._post_run = PostRunMemoryCoordinator(
             manager=memory_manager,
             reflector=memory_reflector,
@@ -203,6 +212,7 @@ class AgentRuntime:
             skill_store=skill_store,
             skill_context_provider=skill_context_provider,
             run_budget=self._run_budget,
+            constraints_provider=constraints_provider,
         )
 
     # 函数说明：AgentRuntime.tool_executor
@@ -286,6 +296,14 @@ class AgentRuntime:
                         content=user_input,
                     ),
                 )
+            recorder: RunMessageRecorder | None = None
+            if self._run_message_store is not None:
+                with suppress(Exception):
+                    recorder = await self._run_message_store.start_recording(
+                        run_id,
+                        conversation_id=conversation_id,
+                        history=history,
+                    )
             try:
                 result = await self._loop.run(
                     run_id,
@@ -298,6 +316,7 @@ class AgentRuntime:
                     recovery_checkpoint=recovery_checkpoint,
                     mode=mode,
                     tool_context_metadata=tool_context_metadata,
+                    message_recorder=recorder,
                 )
             except BaseException as exc:
                 if self._checkpoint_store is not None:
@@ -308,6 +327,8 @@ class AgentRuntime:
                         )
                 raise
 
+            if recorder is not None:
+                await recorder.sync(result.messages)
             if self._checkpoint_store is not None:
                 if result.ok:
                     await self._checkpoint_store.complete(

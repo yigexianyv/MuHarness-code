@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.runtime.run import RunStatus
+from app.runtime.run import RunStatus, history_sha256
 
 from ..dispatcher import RpcContext, RpcDispatcher
 from ..protocol import (
@@ -181,6 +181,89 @@ async def run_recover(params: dict[str, Any], ctx: RpcContext) -> dict[str, Any]
 # 返回：类型 `str`；返回 `value`。
 # 分支与异常：
 #   当 `not isinstance(value, str) or not value` 时，抛出 `JsonRpcError(…)`。
+_CONTEXT_MESSAGES_MAX_LIMIT = 200
+
+
+async def run_context_messages(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """分页读取一次运行看过的原始消息：继承的会话历史 + 本次运行新增的消息。
+
+    序号与摘要覆盖水位一致，面板据此展示"第 a~b 条已由摘要替代"的原文。
+    """
+    run_id = _require_str(params, "run_id")
+    offset = params.get("offset", 0)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise JsonRpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            "offset must be a non-negative integer",
+        )
+    limit = _positive_int(params, "limit", default=50)
+    limit = min(limit, _CONTEXT_MESSAGES_MAX_LIMIT)
+    application = ctx.application
+    store = application.run_message_store
+    if store is None:
+        raise JsonRpcError(INVALID_STATE, "run message store is not ready")
+    ref = await store.history_ref(run_id)
+    if ref is None:
+        raise JsonRpcError(
+            RESOURCE_NOT_FOUND,
+            "该运行没有原文记录（功能上线前的运行，或不属于普通会话）",
+        )
+    inherited_count = ref.inherited_count
+    own_count = await store.count(run_id)
+    total = inherited_count + own_count
+    end = min(total, offset + limit)
+    items: list[dict[str, Any]] = []
+    if offset < inherited_count:
+        if ref.conversation_id is None:
+            raise JsonRpcError(
+                INVALID_STATE,
+                f"该运行没有关联会话，无法还原它继承的前 {inherited_count} 条消息",
+            )
+        history = (
+            await application.conversation_store.load_messages(ref.conversation_id)
+            if await application.conversation_store.get(ref.conversation_id)
+            is not None
+            else ()
+        )
+        inherited = tuple(history[:inherited_count])
+        if (
+            len(inherited) != inherited_count
+            or history_sha256(inherited) != ref.inherited_sha256
+        ):
+            raise JsonRpcError(
+                INVALID_STATE,
+                "会话历史在该运行之后被改写，无法还原它继承的前 "
+                f"{inherited_count} 条消息；本次运行新增的消息"
+                f"（从第 {inherited_count + 1} 条开始）仍可查看",
+            )
+        items.extend(
+            {"index": index, "message": inherited[index], "inherited": True}
+            for index in range(offset, min(end, inherited_count))
+        )
+    own_start = max(offset, inherited_count) - inherited_count
+    own_limit = end - inherited_count - own_start
+    if own_limit > 0:
+        items.extend(
+            {"index": inherited_count + index, "message": message, "inherited": False}
+            for index, message in await store.load(
+                run_id,
+                offset=own_start,
+                limit=own_limit,
+            )
+        )
+    return {
+        "run_id": run_id,
+        "conversation_id": ref.conversation_id,
+        "inherited_count": inherited_count,
+        "total": total,
+        "offset": offset,
+        "messages": items,
+    }
+
+
 def _require_str(params: dict[str, Any], key: str) -> str:
     value = params.get(key)
     if not isinstance(value, str) or not value:
@@ -221,3 +304,4 @@ def register(dispatcher: RpcDispatcher) -> None:
     dispatcher.register("run.cancel", run_cancel)
     dispatcher.register("run.interrupt", run_interrupt)
     dispatcher.register("run.recover", run_recover)
+    dispatcher.register("run.context.messages", run_context_messages)

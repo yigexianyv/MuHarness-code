@@ -108,7 +108,12 @@ from app.runtime.mea.runtimes import (
     RoleLimits,
     role_limits,
 )
-from app.runtime.run import RunManager, RunStatus, SQLiteRunStore
+from app.runtime.run import (
+    RunManager,
+    RunStatus,
+    SQLiteRunMessageStore,
+    SQLiteRunStore,
+)
 from app.safety.approval import (
     SQLiteApprovalStore,
     WebApprovalGate,
@@ -446,6 +451,7 @@ class Application:
         self.mcp_error: str | None = None
         self.runtime: AgentRuntime | None = None
         self.run_store: SQLiteRunStore | None = None
+        self.run_message_store: SQLiteRunMessageStore | None = None
         self.run_manager: RunManager | None = None
         self.conversation_service: ConversationService | None = None
         self.conversation_lifecycle: ConversationLifecycleService | None = None
@@ -492,6 +498,8 @@ class Application:
         await trace_store.initialize()
         checkpoint_store = SQLiteCheckpointStore(database)
         await checkpoint_store.initialize()
+        run_message_store = SQLiteRunMessageStore(database)
+        await run_message_store.initialize()
         rule_store = SQLitePermissionRuleStore(database)
         await rule_store.initialize()
         policy_engine = PermissionPolicyEngine(rule_store)
@@ -678,6 +686,8 @@ class Application:
             skill_context_provider=skill_context_provider,
             post_run_submit=self.post_run_processor.submit,
             run_budget_config=self._run_budget_config,
+            run_message_store=run_message_store,
+            constraints_provider=conversation_store.constraints_for_request,
         )
 
         run_store = SQLiteRunStore(database)
@@ -840,6 +850,7 @@ class Application:
             self.post_run_processor,
             mea_runner=mea_runner,
             mea_store=mea_store,
+            run_message_store=run_message_store,
         )
 
         self.conversation_store = conversation_store
@@ -847,6 +858,7 @@ class Application:
         self.evidence_store = evidence_store
         self.trace_store = trace_store
         self.checkpoint_store = checkpoint_store
+        self.run_message_store = run_message_store
         self.rule_store = rule_store
         self.policy_engine = policy_engine
         self.approval_store = approval_store

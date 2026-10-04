@@ -7,6 +7,7 @@ import type {
   AgentRunTrace,
   AgentResult,
   Run,
+  RunContextMessagesPage,
   RunUsageSummary,
 } from './types'
 
@@ -57,4 +58,17 @@ export async function getRunTrace(
   runId: string,
 ): Promise<{ run: AgentRunTrace; events: AgentEvent[]; usage: RunUsageSummary }> {
   return rpcClient.call(RpcMethods.traceGet, { run_id: runId })
+}
+
+/** 分页读取运行看过的原始消息（继承的会话历史 + 本次运行新增的消息）。 */
+export async function getRunContextMessages(
+  runId: string,
+  offset: number,
+  limit: number,
+): Promise<RunContextMessagesPage> {
+  return rpcClient.call(RpcMethods.runContextMessages, {
+    run_id: runId,
+    offset,
+    limit,
+  })
 }

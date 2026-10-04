@@ -1,9 +1,10 @@
 
 
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 
-import type { AgentEvent } from '../api/types'
+import type { AgentEvent, ConversationSummarySnapshot } from '../api/types'
 import ContextInspector from './ContextInspector'
 
 function contextEvent(): AgentEvent {
@@ -124,5 +125,90 @@ describe('ContextInspector', () => {
     const html = renderToStaticMarkup(<ContextInspector events={[contextEvent()]} />)
     expect(html).toContain('模型请求尚未完成')
     expect(html).not.toContain('0 cached')
+  })
+})
+
+function snapshot(partial: Partial<ConversationSummarySnapshot>): ConversationSummarySnapshot {
+  return {
+    current_objective: null,
+    user_constraints: [],
+    key_decisions: [],
+    completed_work: [],
+    current_state: [],
+    pending_work: [],
+    important_facts: [],
+    ...partial,
+  }
+}
+
+function started(partial: Partial<AgentEvent>): AgentEvent {
+  return {
+    event_id: `e${partial.step}`,
+    run_id: 'r1',
+    conversation_id: 'c1',
+    sequence: partial.step ?? 1,
+    type: 'model_started',
+    event_time: '2026-10-04T00:00:00Z',
+    step: 1,
+    provider: 'fake',
+    model: 'fake',
+    message: null,
+    tool_call: null,
+    tool_result: null,
+    usage: null,
+    stop_reason: null,
+    approval_decision: null,
+    context_window: 128_000,
+    working_input_budget: 128_000,
+    ...partial,
+  }
+}
+
+function render(events: AgentEvent[], conversationId: string | null): string {
+  const client = new QueryClient()
+  return renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <ContextInspector events={events} runId="r1" conversationId={conversationId} />
+    </QueryClientProvider>,
+  )
+}
+
+describe('ContextInspector 上下文面板', () => {
+  const previous = snapshot({ current_objective: '修复分页', user_constraints: ['只改 backend', '不要改数据库'] })
+  const events = [
+    started({ step: 1, prepared_input_tokens: 12_000, summary_snapshot: previous, summary_covered_before: 0, summary_covered_after: 0 }),
+    started({
+      step: 2,
+      original_estimated_input_tokens: 131_000,
+      prepared_input_tokens: 58_000,
+      compaction_stage: 'conversation_summary',
+      summary_updated: true,
+      summary_snapshot: snapshot({ current_objective: '修复分页', user_constraints: ['只改 backend'] }),
+      summary_previous_snapshot: previous,
+      summary_covered_before: 0,
+      summary_covered_after: 24,
+      compacted_tool_results: 3,
+      source_message_count: 40,
+      constraints_possibly_dropped: ['不要改数据库'],
+      constraints_revision: 2,
+    }),
+  ]
+
+  it('展示压缩时间线、被替代范围、摘要和约束提醒', () => {
+    const html = render(events, 'c1')
+    expect(html).toContain('时间线')
+    expect(html).toContain('──压缩──▶')
+    expect(html).toContain('第 1~24 条消息已由摘要替代')
+    expect(html).toContain('3 个工具输出被截短')
+    expect(html).toContain('⚠ 1 条约束可能丢失')
+    expect(html).toContain('当前摘要（步骤 2 生成）')
+    expect(html).toContain('和上一版对比')
+    expect(html).toContain('&quot;不要改数据库&quot;')
+    expect(html).toContain('必须记住的事项')
+  })
+
+  it('长任务子运行不显示必须记住的事项编辑框', () => {
+    const html = render(events, null)
+    expect(html).not.toContain('必须记住的事项')
   })
 })

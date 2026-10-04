@@ -1,6 +1,6 @@
 
 
-import type { AgentEvent, Run } from '../api/types'
+import type { AgentEvent, ConversationSummarySnapshot, Run } from '../api/types'
 
 export interface ContextBreakdownItem {
   key: 'messages' | 'tool_schemas' | 'tool_results' | 'skills' | 'other'
@@ -46,6 +46,16 @@ export interface ContextStepVM {
   upstreamCachedTokens: number | null
   upstreamCacheRatio: number | null
   breakdown: ContextBreakdownItem[]
+  /** 本步请求前的原始消息总数（继承历史 + 本次运行）。 */
+  sourceMessageCount: number | null
+  /** 摘要覆盖水位：[0, coveredAfter) 的原始消息已由摘要替代。 */
+  coveredBefore: number | null
+  coveredAfter: number | null
+  summarySnapshot: ConversationSummarySnapshot | null
+  summaryPreviousSnapshot: ConversationSummarySnapshot | null
+  constraintsPossiblyDropped: string[]
+  /** 本步请求实际采用的"必须记住的事项"版本；null 表示未提供。 */
+  constraintsRevision: number | null
 }
 
 export interface TraceGroupVM {
@@ -175,8 +185,83 @@ export function buildContextSteps(events: AgentEvent[]): ContextStepVM[] {
           ...item,
           ratio: prepared > 0 ? item.tokens / prepared : 0,
         })),
+        sourceMessageCount: numberOrNull(event.source_message_count),
+        coveredBefore: numberOrNull(event.summary_covered_before),
+        coveredAfter: numberOrNull(event.summary_covered_after),
+        summarySnapshot: event.summary_snapshot ?? null,
+        summaryPreviousSnapshot: event.summary_previous_snapshot ?? null,
+        constraintsPossiblyDropped: event.constraints_possibly_dropped ?? [],
+        constraintsRevision: numberOrNull(event.constraints_revision),
       }
     })
+}
+
+export type SummaryFieldKey = keyof ConversationSummarySnapshot
+
+export const SUMMARY_FIELDS: { key: SummaryFieldKey; label: string }[] = [
+  { key: 'current_objective', label: '目标' },
+  { key: 'user_constraints', label: '用户约束' },
+  { key: 'key_decisions', label: '关键决策' },
+  { key: 'completed_work', label: '已完成' },
+  { key: 'current_state', label: '当前状态' },
+  { key: 'pending_work', label: '待办' },
+  { key: 'important_facts', label: '重要事实' },
+]
+
+export function summaryEntries(
+  snapshot: ConversationSummarySnapshot | null,
+  key: SummaryFieldKey,
+): string[] {
+  if (!snapshot) return []
+  const value = snapshot[key]
+  if (Array.isArray(value)) return value
+  return typeof value === 'string' && value ? [value] : []
+}
+
+/** 所选步骤生效的摘要：本步或之前最近一次附带的快照。 */
+export function effectiveSummary(
+  steps: ContextStepVM[],
+  step: number,
+): { snapshot: ConversationSummarySnapshot; fromStep: number } | null {
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const candidate = steps[index]
+    if (candidate.step > step || !candidate.summarySnapshot) continue
+    return { snapshot: candidate.summarySnapshot, fromStep: candidate.step }
+  }
+  return null
+}
+
+export interface SummaryFieldDiff {
+  key: SummaryFieldKey
+  label: string
+  kept: string[]
+  added: string[]
+  removed: string[]
+}
+
+/** 按字段对比两版摘要；文字有任何改写都会显示为一删一增。 */
+export function diffSummary(
+  previous: ConversationSummarySnapshot | null,
+  next: ConversationSummarySnapshot | null,
+): SummaryFieldDiff[] {
+  return SUMMARY_FIELDS.map(({ key, label }) => {
+    const before = summaryEntries(previous, key)
+    const after = summaryEntries(next, key)
+    return {
+      key,
+      label,
+      kept: after.filter((entry) => before.includes(entry)),
+      added: after.filter((entry) => !before.includes(entry)),
+      removed: before.filter((entry) => !after.includes(entry)),
+    }
+  })
+}
+
+/** 本步新被摘要替代的原始消息范围 [from, to)；没有新替代时返回 null。 */
+export function newlyCoveredRange(step: ContextStepVM): { from: number; to: number } | null {
+  if (step.coveredBefore === null || step.coveredAfter === null) return null
+  if (step.coveredAfter <= step.coveredBefore) return null
+  return { from: step.coveredBefore, to: step.coveredAfter }
 }
 
 /** 将事件序列整理为可展开的运行轨迹分组。 */
