@@ -388,7 +388,8 @@ class Env:
     # 副作用与资源：
     #   更新对象字段：`self.runs`。
     def runner(
-        self, *, tasks: FileTaskStore | None = None, sink=None, timeouts=None
+        self, *, tasks: FileTaskStore | None = None, sink=None, timeouts=None,
+        executor_evidence=None,
     ) -> MeaRunner:
         self.runs = FakeRuns(self.table, self.script)
 
@@ -411,6 +412,7 @@ class Env:
             workspace_root=self.workspace,
             final_message_sink=sink or record,
             role_timeouts=timeouts,
+            executor_evidence=executor_evidence,
         )
 
 
@@ -720,10 +722,20 @@ async def test_final_audit_with_open_steps_is_invalid(tmp_path: Path) -> None:
 #   验证条件：`waiting.pending_choices == ('测试库', '生产库')`。
 #   验证条件：
 # `result.accepted and result.amendment_id == 'A1' and (result.revision == 2)`。
-async def test_ask_then_answer_adds_amendment_for_every_role(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("question", "choices", "answer"),
+    [
+        ("用测试库还是生产库？", "测试库 | 生产库", "测试库"),
+        ("是否删除 demo/b.txt？", "授权删除 `demo/b.txt` | 不授权并终止任务",
+         "授权删除 `demo/b.txt`"),
+    ],
+)
+async def test_ask_then_answer_adds_amendment_for_every_role(
+    tmp_path: Path, question: str, choices: str, answer: str
+) -> None:
     script = Script(
         manager=[
-            manager("下一步: 请示用户\n问题: 用测试库还是生产库？\n选项: 测试库 | 生产库"),
+            manager(f"下一步: 请示用户\n问题: {question}\n选项: {choices}"),
             manager(audit_only("s1")),
             manager("下一步: 阻塞"),
         ],
@@ -736,15 +748,16 @@ async def test_ask_then_answer_adds_amendment_for_every_role(tmp_path: Path) -> 
 
     waiting = await runner.run(mea_id)
     assert waiting.status is MeaStatus.WAITING_USER
-    assert waiting.pending_question == "用测试库还是生产库？"
-    assert waiting.pending_choices == ("测试库", "生产库")
+    assert waiting.pending_question == question
+    assert waiting.pending_choices == tuple(choices.split(" | "))
 
-    result = await runner.answer(mea_id, "测试库")
+    result = await runner.answer(mea_id, waiting.pending_choices[0])
     assert result.accepted and result.amendment_id == "A1" and result.revision == 2
     await runner.wait(mea_id)
 
     assert "A1（生效于要求 v2" in script.prompts[AgentMode.MANAGE][1]
-    assert "请示回答）: 测试库" in script.prompts[AgentMode.AUDIT][0]
+    assert f"请示回答）: {answer}" in script.prompts[AgentMode.MANAGE][1]
+    assert f"请示回答）: {answer}" in script.prompts[AgentMode.AUDIT][0]
 
 
 # 函数说明：test_start_rejects_steps_without_acceptance
@@ -1387,6 +1400,145 @@ async def test_unrepairable_header_is_synthesized_as_blocked(tmp_path: Path) -> 
     assert (rnd.audit_status, rnd.integrity_status, rnd.step_acceptance) == (
         "blocked", "suspect", "not_satisfied"
     )
+
+
+@pytest.mark.parametrize("route", [execute("s1"), audit_only("s1")])
+async def test_step_audit_wrong_scope_is_repaired_without_reexecuting(tmp_path, route):
+    script = Script(
+        manager=[manager(route), manager("下一步: 阻塞")],
+        executor=["读取内容 v2"],
+        auditor=[report(step="not_applicable") + "\n实际读取结果: v2"],
+        repair=report(),
+        final="停",
+    )
+    env = await _env(tmp_path, script)
+    runner = env.runner()
+    mea_id = await _start(env, runner)
+    await runner.run(mea_id)
+    rnd = (await env.store.rounds(mea_id))[0]
+    assert rnd.step_acceptance == "satisfied"
+    assert "实际读取结果: v2" in rnd.auditor_report
+    assert (await _steps(env, mea_id))["s1"] is TaskStepStatus.DONE
+    assert env.runs.executor_starts() == (1 if route == execute("s1") else 0)
+    repairs = [
+        p for p in script.prompts[AgentMode.MANAGE] if p.startswith("上一份 auditor")
+    ]
+    assert len(repairs) == 1
+    assert "禁止 not_applicable" in repairs[0]
+
+
+@pytest.mark.parametrize("repair", [report(step="not_applicable"), report()])
+async def test_scope_repair_cannot_erase_blocking_findings(tmp_path, repair):
+    script = Script(
+        manager=[manager(audit_only("s1")), manager("下一步: 阻塞")],
+        auditor=[report(step="not_applicable", blocking="unknown: 缺少真实读取结果")],
+        repair=repair,
+        final="停",
+    )
+    env = await _env(tmp_path, script)
+    runner = env.runner()
+    mea_id = await _start(env, runner)
+    await runner.run(mea_id)
+    rnd = (await env.store.rounds(mea_id))[0]
+    assert rnd.step_acceptance == "not_satisfied"
+    assert (await _steps(env, mea_id))["s1"] is TaskStepStatus.TODO
+
+
+async def test_audit_only_receives_original_executor_run_records(tmp_path):
+    received = []
+
+    async def evidence(run_id, conversation_id, mea_id):
+        received.append((run_id, conversation_id, mea_id))
+        return (
+            '{"run_id":"' + run_id + '","final_reply":"v2","call_list_complete":true}'
+        )
+
+    def recheck(prompt):
+        assert '"final_reply":"v2"' in prompt
+        assert "来自持久化 Trace" in prompt
+        assert "不得据此证明未执行" in prompt
+        return report()
+
+    script = Script(
+        manager=[
+            manager(execute("s1")),
+            manager(audit_only("s1")),
+            manager("下一步: 阻塞"),
+        ],
+        executor=["v2"],
+        auditor=[report(status="blocked", step="not_satisfied"), recheck],
+        final="停",
+    )
+    env = await _env(tmp_path, script)
+    runner = env.runner(executor_evidence=evidence)
+    mea_id = await _start(env, runner)
+    await runner.run(mea_id)
+    rounds = await env.store.rounds(mea_id)
+    assert received == [(rounds[0].executor_run_id, "conv-1", mea_id)] * 2
+    assert (await _steps(env, mea_id))["s1"] is TaskStepStatus.DONE
+    assert env.runs.executor_starts() == 1
+
+
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_final_audit_requires_final_scope_header(tmp_path, repair_succeeds):
+    script = Script(
+        manager=[
+            manager(execute("s1")),
+            manager(execute("s2")),
+            manager(FINAL),
+            manager("下一步: 阻塞"),
+        ],
+        executor=["done", "done"],
+        auditor=[report(), report(), report()],
+        repair=report(step="not_applicable") if repair_succeeds else report(),
+        final="停",
+    )
+    env = await _env(tmp_path, script)
+    runner = env.runner()
+    mea_id = await _start(env, runner)
+    mea = await runner.run(mea_id)
+    assert mea.status is (MeaStatus.COMPLETED if repair_succeeds else MeaStatus.BLOCKED)
+
+
+async def test_audit_keeps_referenced_original_run_when_retries_exceed_limit(tmp_path):
+    from app.runtime.mea.models import MeaRound, now_utc
+
+    received = []
+
+    async def evidence(run_id, conversation_id, mea_id):
+        received.append(run_id)
+        return '{"run_id":"' + run_id + '"}'
+
+    env = await _env(tmp_path, Script())
+    runner = env.runner(executor_evidence=evidence)
+    mea_id = await _start(env, runner)
+    mea = await env.store.require(mea_id)
+    task = await env.tasks.get(mea.task_id)
+    requirements = await env.store.requirements(mea_id)
+    now = now_utc()
+    rounds = [
+        MeaRound(
+            mea_run_id=mea_id,
+            index=i,
+            step_id="s1",
+            executor_run_id=f"exec-{i}",
+            created_at=now,
+            updated_at=now,
+        )
+        for i in range(1, 5)
+    ]
+    current = MeaRound(
+        mea_run_id=mea_id,
+        index=5,
+        step_id="s1",
+        kind=RoundKind.AUDIT_ONLY,
+        related_refs=("round_001",),
+        created_at=now,
+        updated_at=now,
+    )
+    prompt = await runner._auditor_prompt(mea, current, task, requirements, rounds)
+    assert received == ["exec-1", "exec-3", "exec-4"]
+    assert "不能代表本步骤或整个任务的全部历史" in prompt
 
 
 # 函数说明：test_once_note_reaches_only_the_next_manager

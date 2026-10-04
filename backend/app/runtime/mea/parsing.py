@@ -351,7 +351,7 @@ def _round_refs(text: str) -> tuple[str, ...]:
 def _choices(raw: str | None, question: str | None) -> tuple[str, ...]:
     if raw:
         first_line = raw.splitlines()[0]
-        parts = [part.strip() for part in re.split(r"\s*[|、,，/]\s*", first_line)]
+        parts = [part.strip() for part in re.split(r"\s*[|｜]\s*", first_line)]
         choices = tuple(part for part in parts if part)
         if choices:
             return choices[:6]

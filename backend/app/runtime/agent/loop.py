@@ -12,6 +12,7 @@ from app.domain.memory import (
 )
 from app.domain.skills import SkillContextProvider, SkillStore
 from app.domain.task.context import TaskContextProvider
+from app.domain.task.models import TaskStatus
 from app.models.registry import ModelAdapterRegistry
 from app.models.types import (
     AgentMode,
@@ -97,12 +98,18 @@ _PLAN_MODE_SYSTEM_MESSAGE = (
     "memory_read、memory_search、history_search、history_read、evidence_search、"
     "evidence_read；可用 task_create、task_update、task_get、task_list "
     "保存和核对计划。\n"
-    "必要调查结束后，必须用 task_create 或 task_update 保存一个 PENDING Task，"
+    "新任务调查结束后，用 task_create 或 task_update 保存一个 PENDING Task，"
     "包含 title、goal 和具体 steps。计划不是执行证据，不得填写虚假的 DONE 步骤、"
     "已完成 state 或已验证 key_facts。\n"
     "每个步骤包含 acceptance，说明独立检查的通过条件；"
     "工作量应能在一次执行运行内完成，过大则继续拆分。\n"
-    "最后简述目标、步骤和验收方式，等待计划确认。"
+    "Task 只保存任务内容和用户约束，不要把本轮临时的 PLAN 模式、"
+    "等待确认或禁止实施写成 goal、description、constraints 或步骤的长期限制。"
+    "用户原话中的仅规划、不执行或禁止修改要求仍须保留。\n"
+    "已有 ACTIVE/PAUSED 任务只更新计划内容，保持任务与步骤原状态；"
+    "不得改回 PENDING，也不要要求重新接受已有计划。\n"
+    "最后简述目标、步骤和验收方式；新计划等待确认，已有任务说明本轮仅更新计划，"
+    "实际实施需使用执行入口，暂停任务须先恢复。"
 )
 
 _EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS = 8192
@@ -1141,18 +1148,33 @@ class AgentLoop:
                     )
                 final_message = assistant_message
                 if mode is AgentMode.PLAN:
-                    plan_valid = False
+                    plan_status = None
                     if (
                         plan_task_id is not None
                         and self._task_context_provider is not None
                     ):
-                        plan_valid = (
-                            await self._task_context_provider.pending_plan_is_valid(
+                        plan_status = (
+                            await self._task_context_provider.saved_plan_status(
                                 conversation_id,
                                 plan_task_id,
                             )
                         )
-                    if not plan_valid:
+                    if plan_status in (TaskStatus.ACTIVE, TaskStatus.PAUSED):
+                        action = (
+                            "实施时使用“继续执行”或“长任务执行”。"
+                            if plan_status is TaskStatus.ACTIVE
+                            else "任务保持暂停；需要实施时先恢复任务。"
+                        )
+                        final_message = assistant_message.model_copy(update={
+                            "content": (assistant_message.content or "")
+                            + "\n\n应用状态：已更新已接受任务的计划，"
+                            + f"状态仍为 {plan_status.value}。"
+                            + "本次仍是计划模式，未实施工作区修改；无需重新接受计划。"
+                            + action,
+                        })
+                        plan_task_id = None
+                        messages[-1] = final_message
+                    elif plan_status is not TaskStatus.PENDING:
                         prefix = (
                             _PLAN_NO_TASK_MESSAGE
                             if not plan_task_created

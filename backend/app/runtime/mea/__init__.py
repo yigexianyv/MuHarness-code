@@ -2,6 +2,7 @@
 """Manage-Execute-Audit 长任务循环：每轮 Manager → Executor → Auditor 三个子 Run。"""
 
 from .events import MeaEvents, MeaRunGateway, round_summary
+from .executor_evidence import ExecutorEvidenceProvider
 from .extra_tools import ExtraToolsError, optional_executor_tools, validate_extra_tools
 from .models import (
     CLOSED_MEA_STATUSES,
@@ -23,6 +24,7 @@ __all__ = [
     "TERMINAL_MEA_STATUSES",
     "AmendResult",
     "ExtraToolsError",
+    "ExecutorEvidenceProvider",
     "MeaEvents",
     "MeaRound",
     "MeaRun",

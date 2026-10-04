@@ -94,6 +94,7 @@ from app.runtime.context import (
     SQLiteConversationSummaryStore,
 )
 from app.runtime.mea import (
+    ExecutorEvidenceProvider,
     MeaEvents,
     MeaRunGateway,
     MeaRunner,
@@ -842,6 +843,7 @@ class Application:
             ),
             final_message_sink=append_final_message,
             recovery_info=RecoveryInfoProvider(checkpoint_store, trace_store),
+            executor_evidence=ExecutorEvidenceProvider(trace_store, run_store),
             role_timeouts=mea_runtimes.timeouts(),
         )
         reconciled_meas = await mea_runner.reconcile()

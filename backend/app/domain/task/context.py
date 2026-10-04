@@ -123,7 +123,7 @@ class TaskContextProvider:
     #   conversation_id：目标会话标识，类型 `str | None`。
     #   task_id：目标任务标识，类型 `str`。
     # 返回：类型 `bool`；按分支返回 `False`；`True`。
-    # 关键调用（按源码出现顺序，实际执行取决于分支）：`self._store.resolve`。
+    # 关键调用：`self.saved_plan_status`。
     # 分支与异常：
     #   当 `not conversation_id or not task_id` 时，返回 `False`。
     #   当 `task is None` 时，返回 `False`。
@@ -135,26 +135,35 @@ class TaskContextProvider:
         task_id: str,
     ) -> bool:
         """检查待确认计划是否仍对应当前任务版本。"""
+        status = await self.saved_plan_status(conversation_id, task_id)
+        return status is TaskStatus.PENDING
+
+    async def saved_plan_status(
+        self, conversation_id: str | None, task_id: str,
+    ) -> TaskStatus | None:
+        """区分新待确认计划与已接受任务的计划更新；不改变任务状态。"""
         if not conversation_id or not task_id:
-            return False
+            return None
         task = await self._store.resolve(
             task_id,
             owner_conversation_id=conversation_id,
         )
         if task is None:
-            return False
-        if task.status is not TaskStatus.PENDING:
-            return False
+            return None
+        if task.status not in (
+            TaskStatus.PENDING, TaskStatus.ACTIVE, TaskStatus.PAUSED,
+        ):
+            return None
         if not task.goal:
-            return False
+            return None
         if not task.steps:
-            return False
-        if any(
+            return None
+        if task.status is TaskStatus.PENDING and any(
             step.status in {TaskStepStatus.DONE, TaskStepStatus.IN_PROGRESS}
             for step in task.steps
         ):
-            return False
-        return True
+            return None
+        return task.status
 
 
 # 函数说明：steps_missing_acceptance

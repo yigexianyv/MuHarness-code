@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Callable
 from typing import Any
 
+import pytest
 from pydantic import SecretStr
 
 from app.domain.conversation.store import SQLiteConversationStore
@@ -28,14 +31,19 @@ from app.models.types import (
     ToolCall,
     ToolDefinition,
 )
+from app.records.trace import SQLiteTraceEventHandler, SQLiteTraceStore
 from app.runtime.agent.runtime import AgentRuntime
 from app.runtime.checkpoint import SQLiteCheckpointStore
+from app.runtime.mea.events import MeaRunGateway
+from app.runtime.mea.executor_evidence import ExecutorEvidenceProvider
 from app.runtime.mea.models import MeaStatus, RoundKind, RoundPhase
 from app.runtime.mea.prompts import FINAL_RESPONSE_INSTRUCTIONS
 from app.runtime.mea.runner import ROLE_NAMES, MeaRunner
 from app.runtime.mea.store import SQLiteMeaStore
 from app.runtime.run import RunManager, RunStatus, SQLiteRunStore
 from app.tools.base import BaseTool
+from app.tools.builtin.read_file import ReadFileTool
+from app.tools.builtin.write_file import WriteFileTool
 from app.tools.registry import ToolRegistry
 
 
@@ -317,7 +325,10 @@ async def test_full_mea_over_real_run_manager(tmp_path) -> None:
     #   当 `_after_tool(request)` 时，返回 `_response(report())`。
     def run_auditor(request: ModelRequest) -> ModelResponse:
         if _after_tool(request):
-            return _response(report())
+            text = report()
+            if "- 最终验收。" in _last_user(request):
+                text = text.replace("步骤验收: satisfied", "步骤验收: not_applicable")
+            return _response(text)
         call = ToolCall(id="audit-w", name="write_file", arguments={"path": "audit.txt", "content": "x"})
         return _response(tool_calls=(call,))
 
@@ -427,3 +438,226 @@ async def test_full_mea_over_real_run_manager(tmp_path) -> None:
     # 重放终结（同一个幂等键）不会重复追加
     await sink(conversation.id, "长任务已完成：CSV 已导入。", f"{mea.id}/final")
     assert len(await conversations.load_messages(conversation.id)) == 1
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["scope_error", "audit_recheck", "split_batch", "existing_b",
+     "stale_plan_description", "user_plan_only"],
+)
+async def test_three_round_file_task_with_real_tools_and_persisted_audit_evidence(
+    tmp_path, scenario
+):
+    database = tmp_path / "m.db"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    old_description = "当前为计划模式，仅保存执行计划，不修改文件。"
+    has_old_description = scenario in ("stale_plan_description", "user_plan_only")
+    if scenario == "existing_b":
+        (workspace / "demo").mkdir()
+        (workspace / "demo/b.txt").write_bytes(b"previous run")
+    run_store = SQLiteRunStore(database)
+    checkpoints = SQLiteCheckpointStore(database)
+    traces = SQLiteTraceStore(database)
+    mea_store = SQLiteMeaStore(database)
+    for store in (run_store, checkpoints, traces, mea_store):
+        await store.initialize()
+    tasks = FileTaskStore(tmp_path / "tasks")
+    await tasks.initialize()
+    tools = ToolRegistry()
+    tools.register(WriteFileTool(workspace))
+    tools.register(ReadFileTool(workspace))
+    routes = [execute("s1"), execute("s2")]
+    if scenario == "split_batch":
+        routes.append("下一步: 阻塞")
+    else:
+        routes.append(execute("s3"))
+        if scenario == "audit_recheck":
+            routes.append(
+                "下一步: 仅审计\n步骤: s3\n核实重点: 核对原运行回复和调用清单"
+            )
+        routes.append(FINAL)
+    repairs = []
+
+    def manage(request):
+        prompt = _last_user(request)
+        if prompt.startswith(FINAL_RESPONSE_INSTRUCTIONS):
+            return _response("demo/a.txt 的内容是 v2")
+        if prompt.startswith("上一份 auditor"):
+            repairs.append(prompt)
+            return _response(report())
+        assert "计划已被接受，当前是长任务执行阶段" in prompt
+        if has_old_description:
+            assert old_description in prompt
+        if scenario == "user_plan_only":
+            assert "[原始请求]\n只生成计划，不执行或修改文件。" in prompt
+            assert "仍须遵守；有真实冲突时请示用户" in prompt
+            return _response(manager("下一步: 请示用户\n问题: 是否授权执行？"))
+        assert "不得因已有文件追加删除或清理前置条件" in prompt
+        return _response(manager(routes.pop(0)))
+
+    def run_executor(request):
+        prompt = _last_user(request)
+        assert "计划已被接受，当前是长任务执行阶段" in prompt
+        if has_old_description:
+            assert old_description in prompt
+        step = re.search(r"所属步骤[^\n]*\n(s\d)", prompt).group(1)
+        results = [m for m in request.messages if m.role is MessageRole.TOOL]
+        if results:
+            if step == "s2" and scenario == "split_batch" and len(results) == 1:
+                return _response(
+                    tool_calls=(
+                        ToolCall(
+                            id="b",
+                            name="write_file",
+                            arguments={"path": "demo/b.txt", "content": "hello"},
+                        ),
+                    )
+                )
+            return _response("v2" if step == "s3" else "写入成功")
+        calls = {
+            "s1": (
+                ToolCall(
+                    id="v1",
+                    name="write_file",
+                    arguments={"path": "demo/a.txt", "content": "v1"},
+                ),
+            ),
+            "s2": (
+                ToolCall(
+                    id="v2",
+                    name="write_file",
+                    arguments={"path": "demo/a.txt", "content": "v2"},
+                ),
+                ToolCall(
+                    id="b",
+                    name="write_file",
+                    arguments={"path": "demo/b.txt", "content": "hello"},
+                ),
+            ),
+            "s3": (
+                ToolCall(id="read", name="read_file", arguments={"path": "demo/a.txt"}),
+            ),
+        }[step]
+        if step == "s2" and scenario == "split_batch":
+            calls = calls[:1]
+        return _response(tool_calls=calls)
+
+    audited = []
+
+    def run_auditor(request):
+        prompt = _last_user(request)
+        assert "计划已被接受，当前是长任务执行阶段" in prompt
+        if has_old_description:
+            assert old_description in prompt
+        records = [
+            json.loads(line)
+            for line in prompt.splitlines()
+            if line.startswith('{"run_id":')
+        ]
+        assert records and all(record["call_list_complete"] for record in records)
+        if "- 最终验收。" in prompt:
+            assert len(records) == 3
+            return _response(
+                report().replace("步骤验收: satisfied", "步骤验收: not_applicable")
+            )
+        step = re.search(r"所属步骤: (s\d)", prompt).group(1)
+        record = records[-1]
+        calls = record["calls"]
+        audited.append((step, record))
+        if step == "s1":
+            assert "当前存在某文件，不能证明本轮提前创建了它" in prompt
+            assert "明确要求初始不存在时仍须核验" in prompt
+            assert len(calls) == 1
+            assert calls[0]["arguments"] == {"path": "demo/a.txt", "content": "v1"}
+            if scenario == "existing_b":
+                assert (workspace / "demo/b.txt").read_bytes() == b"previous run"
+        elif step == "s2":
+            assert len(calls) == 2
+            assert (workspace / "demo/b.txt").read_text() == "hello"
+            if calls[0]["model_step"] != calls[1]["model_step"]:
+                return _response(
+                    report().replace("步骤验收: satisfied", "步骤验收: not_satisfied")
+                )
+        else:
+            assert len(calls) == 1 and calls[0]["tool_name"] == "read_file"
+            assert calls[0]["output_excerpt"] == record["final_reply"] == "v2"
+            if scenario == "audit_recheck" and sum(s == "s3" for s, _ in audited) == 1:
+                return _response(
+                    report().replace("步骤验收: satisfied", "步骤验收: not_satisfied")
+                )
+            if scenario == "scope_error":
+                return _response(
+                    report().replace("步骤验收: satisfied", "步骤验收: not_applicable")
+                )
+        return _response(report())
+
+    runtimes = {
+        mode: AgentRuntime(
+            _registry(reply), tools, provider="fake", checkpoint_store=checkpoints
+        )
+        for mode, reply in [
+            (AgentMode.MANAGE, manage),
+            (AgentMode.EXECUTE, run_executor),
+            (AgentMode.AUDIT, run_auditor),
+        ]
+    }
+    runs = RunManager(run_store, checkpoints, runtimes[AgentMode.MANAGE])
+    runner = MeaRunner(
+        store=mea_store,
+        tasks=tasks,
+        runs=MeaRunGateway(
+            runs, trace_handler_factory=lambda: SQLiteTraceEventHandler(traces)
+        ),
+        runtimes=runtimes,
+        workspace_root=workspace,
+        executor_evidence=ExecutorEvidenceProvider(traces, run_store),
+    )
+    task = await tasks.create(
+        owner_conversation_id="conv",
+        title="三轮文件测试",
+        goal="分三轮写入并读取",
+        description=old_description if has_old_description else None,
+        steps=tuple(
+            TaskStep(id=f"s{i}", title=f"第{i}轮", acceptance=acceptance)
+            for i, acceptance in enumerate(
+                [
+                    "write_file a=v1",
+                    "同一次模型响应两次 write_file：a=v2，b=hello",
+                    "read_file a 并回复 v2，不写文件",
+                ],
+                start=1,
+            )
+        ),
+    )
+    await tasks.plan_accept(task.id)
+    mea = await runner.start(
+        task_id=task.id,
+        conversation_id="conv",
+        spawn=False,
+        original_request=(
+            "只生成计划，不执行或修改文件。" if scenario == "user_plan_only"
+            else "严格分三轮：写 a=v1；同轮写 a=v2 和 b=hello；读取 a 并回复"
+        ),
+    )
+    mea = await runner.run(mea.id)
+    rounds = await mea_store.rounds(mea.id)
+    final_task = await tasks.get(task.id)
+    if scenario == "user_plan_only":
+        assert mea.status is MeaStatus.WAITING_USER
+        assert not (workspace / "demo").exists()
+        assert all(r.executor_run_id is None for r in rounds)
+        return
+    assert (workspace / "demo/a.txt").read_bytes() == b"v2"
+    assert (workspace / "demo/b.txt").read_bytes() == b"hello"
+    if scenario == "split_batch":
+        assert mea.status is MeaStatus.BLOCKED
+        assert final_task.steps[1].status is TaskStepStatus.TODO
+        assert final_task.steps[2].status is TaskStepStatus.TODO
+    else:
+        assert mea.status is MeaStatus.COMPLETED, mea.abort_reason
+        assert all(step.status is TaskStepStatus.DONE for step in final_task.steps)
+        assert sum(bool(r.executor_run_id) for r in rounds) == 3
+        assert len(repairs) == (1 if scenario == "scope_error" else 0)
+        s3_records = [record for step, record in audited if step == "s3"]
+        assert len({record["run_id"] for record in s3_records}) == 1

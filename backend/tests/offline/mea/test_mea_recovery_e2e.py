@@ -265,7 +265,10 @@ class Models:
     # 关键调用（按源码出现顺序，实际执行取决于分支）：`_last_user` → `_response`。
     def audit(self, request: ModelRequest) -> ModelResponse:
         self.auditor_prompts.append(_last_user(request))
-        return _response(REPORT)
+        text = REPORT
+        if "- 最终验收。" in _last_user(request):
+            text = text.replace("步骤验收: satisfied", "步骤验收: not_applicable")
+        return _response(text)
 
 
 # 函数说明：_registry

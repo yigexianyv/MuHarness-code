@@ -372,7 +372,7 @@ async def test_plan_mode_allows_read_and_search(tmp_path) -> None:
 #   验证条件：`task is not None`。
 async def test_plan_mode_creates_pending_task(tmp_path) -> None:
     tools, task_store, _ = await _build_tools(tmp_path)
-    registry, _ = _registry(
+    registry, adapter = _registry(
         [
             _response(
                 tool_calls=(
@@ -400,6 +400,11 @@ async def test_plan_mode_creates_pending_task(tmp_path) -> None:
     assert result.ok is True
     assert result.plan_task_id is not None
     assert "without creating a task" not in (result.content or "")
+    assert any(
+        "不要把本轮临时的 PLAN 模式" in (message.content or "")
+        and "用户原话中的仅规划、不执行或禁止修改要求仍须保留" in message.content
+        for message in adapter.requests[0].messages
+    )
 
     task = await task_store.get(result.plan_task_id)
     assert task is not None
@@ -424,14 +429,36 @@ async def test_plan_mode_creates_pending_task(tmp_path) -> None:
 #   验证条件：`result.plan_task_id == created.id`。
 #   验证条件：`updated is not None`。
 #   验证条件：`updated.goal == '细化后的目标'`。
-async def test_plan_mode_can_update_plan_content(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "status", [TaskStatus.PENDING, TaskStatus.ACTIVE, TaskStatus.PAUSED]
+)
+async def test_plan_mode_can_update_plan_content(tmp_path, status) -> None:
     tools, task_store, _ = await _build_tools(tmp_path)
     created = await task_store.create(
         title="初始计划",
+        goal="初始目标",
+        steps=(TaskStep(id="s1", title="第一步"),),
         owner_conversation_id="conv-1",
     )
+    responses = []
+    step_status = TaskStepStatus.TODO
+    if status is not TaskStatus.PENDING:
+        await task_store.plan_accept(created.id)
+        step_status = TaskStepStatus.DONE
+        await task_store.set_step_status(
+            created.id, "s1", step_status, note="已有实际验收记录"
+        )
+        if status is TaskStatus.PAUSED:
+            await task_store.set_status(created.id, status)
+        responses.extend([
+            _response(tool_calls=(
+                _call("task_update", {"task_id": "current", "status": "pending"}),
+            )),
+            _response(tool_calls=(_call("task_get", {"task_id": "current"}),)),
+        ])
+    before = await task_store.get(created.id)
     registry, _ = _registry(
-        [
+        responses + [
             _response(
                 tool_calls=(
                     _call(
@@ -440,7 +467,13 @@ async def test_plan_mode_can_update_plan_content(tmp_path) -> None:
                             "task_id": created.id,
                             "goal": "细化后的目标",
                             "constraints": ["不改动核心模块"],
-                            "steps": [{"title": "第一步"}, {"title": "第二步"}],
+                            "steps": [
+                                {"id": "s1", "title": "第一步",
+                                 "status": step_status.value,
+                                 "note": before.steps[0].note},
+                                {"title": "第二步"},
+                            ],
+                            "expected_revision": before.revision,
                         },
                     ),
                 )
@@ -453,13 +486,27 @@ async def test_plan_mode_can_update_plan_content(tmp_path) -> None:
     )
 
     assert result.ok is True
-    assert result.plan_task_id == created.id
+    if status is TaskStatus.PENDING:
+        assert result.plan_task_id == created.id
+    else:
+        assert result.plan_task_id is None
+        assert result.tool_calls[0].result.success is False
+        assert result.tool_calls[1].result.success is True
+        assert "without a valid pending task" not in result.content
+        assert f"状态仍为 {status.value}" in result.content
+        assert "无需重新接受计划" in result.content
+        if status is TaskStatus.PAUSED:
+            assert "先恢复任务" in result.content
+        assert result.messages[-1] == result.final_message
     updated = await task_store.get(created.id)
     assert updated is not None
     assert updated.goal == "细化后的目标"
     assert updated.constraints == ("不改动核心模块",)
     assert len(updated.steps) == 2
-    assert updated.status is TaskStatus.PENDING
+    assert updated.status is status
+    assert updated.steps[0].status is step_status
+    assert updated.steps[0].note == before.steps[0].note
+    assert updated.revision == before.revision + 1
 
 
 
@@ -500,6 +547,58 @@ async def test_plan_mode_task_update_cannot_change_status(tmp_path) -> None:
             ),
         )
     assert (await task_store.get(created.id)).status is TaskStatus.PENDING
+
+
+@pytest.mark.parametrize("step_status", ["in_progress", "done", "blocked"])
+@pytest.mark.parametrize("step_id", ["s1", "s2"])
+async def test_plan_mode_replacement_cannot_advance_steps(
+    tmp_path, step_status, step_id
+) -> None:
+    from app.tools.hooks import ToolExecutionContext
+
+    tools, task_store, _ = await _build_tools(tmp_path)
+    created = await task_store.create(
+        title="初始计划", goal="目标",
+        steps=(TaskStep(id="s1", title="第一步"),),
+        owner_conversation_id="conv-1",
+    )
+    arguments = {
+        "task_id": created.id,
+        "steps": [{"id": step_id, "title": "第一步", "status": step_status,
+                   "note": "模型声称已实施"}],
+    }
+    with pytest.raises(ValueError, match="通过 steps 改变步骤状态"):
+        await tools.get("task_update").execute_with_context(
+            arguments,
+            ToolExecutionContext(
+                tool_call=_call("task_update", arguments),
+                run_id="run-1", conversation_id="conv-1", mode=AgentMode.PLAN,
+            ),
+        )
+    assert await task_store.get(created.id) == created
+
+
+@pytest.mark.parametrize("tool_name", ["task_get", "task_update"])
+async def test_plan_mode_does_not_claim_an_unsaved_update(tmp_path, tool_name) -> None:
+    tools, task_store, _ = await _build_tools(tmp_path)
+    created = await task_store.create(
+        title="初始计划", goal="目标",
+        steps=(TaskStep(id="s1", title="第一步"),),
+        owner_conversation_id="conv-1",
+    )
+    accepted = await task_store.plan_accept(created.id)
+    arguments = {"task_id": "current"}
+    if tool_name == "task_update":
+        arguments["status"] = "pending"
+    registry, _ = _registry([
+        _response(tool_calls=(_call(tool_name, arguments),)),
+        _response(content="计划已更新"),
+    ])
+    result = await _run(registry, tools, mode=AgentMode.PLAN, task_store=task_store)
+    assert result.plan_task_id is None
+    assert "应用状态：已更新" not in result.content
+    assert "Plan mode finished without" in result.content
+    assert await task_store.get(created.id) == accepted
 
 
 
@@ -727,6 +826,11 @@ async def test_pending_plan_validation_conditions(tmp_path) -> None:
 
     await store.plan_accept(valid.id)
     assert await provider.pending_plan_is_valid("conv-1", valid.id) is False
+    assert await provider.saved_plan_status("conv-1", valid.id) is TaskStatus.ACTIVE
+    await store.set_status(valid.id, TaskStatus.PAUSED)
+    assert await provider.saved_plan_status("conv-1", valid.id) is TaskStatus.PAUSED
+    await store.set_status(valid.id, TaskStatus.CANCELLED)
+    assert await provider.saved_plan_status("conv-1", valid.id) is None
 
     other = await store.create(
         title="T",
@@ -738,6 +842,8 @@ async def test_pending_plan_validation_conditions(tmp_path) -> None:
     assert await provider.pending_plan_is_valid("conv-1", "0" * 32) is False
     assert await provider.pending_plan_is_valid(None, "0" * 32) is False
     assert await provider.pending_plan_is_valid("conv-1", "") is False
+    for task_id in (no_goal.id, no_steps.id, with_done.id, with_progress.id, other.id):
+        assert await provider.saved_plan_status("conv-1", task_id) is None
 
 
 

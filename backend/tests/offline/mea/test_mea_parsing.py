@@ -218,6 +218,25 @@ def test_parse_manager_output_question_and_choices() -> None:
     assert yes_no.choices == ("是", "否")
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("授权删除 `demo/b.txt` | 不授权并终止任务",
+         ("授权删除 `demo/b.txt`", "不授权并终止任务")),
+        ("授权仅删除 `demo/b.txt` | 不授权删除，停止并报告阻塞",
+         ("授权仅删除 `demo/b.txt`", "不授权删除，停止并报告阻塞")),
+        ("访问 https://example.com/a/b?x=1,2｜不访问",
+         ("访问 https://example.com/a/b?x=1,2", "不访问")),
+        (r"删除 C:\demo\a,b.txt | 保留 a、b", (r"删除 C:\demo\a,b.txt", "保留 a、b")),
+        ("保留 demo/a.txt、demo/b.txt，不删除",
+         ("保留 demo/a.txt、demo/b.txt，不删除",)),
+    ],
+)
+def test_question_choices_preserve_paths_and_punctuation(raw, expected) -> None:
+    output = parse_manager_output(f"下一步: 请示用户\n问题: 如何处理？\n选项: {raw}")
+    assert output.choices == expected
+
+
 # 函数说明：test_parse_step_updates_none_and_bullets
 # 用途：回归验证回归测试与测试辅助中的 `parse_step_updates_none_and_bullets` 场景，下方
 # 断言说明列出实际通过条件。

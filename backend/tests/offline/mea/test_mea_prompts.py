@@ -105,6 +105,11 @@ def test_manager_prompt_carries_requirements_verbatim_and_budget() -> None:
     assert "- 不要修改数据库结构" in prompt
     assert "A1（生效于要求 v2" in prompt
     assert "(还没有任务契约" in prompt
+    assert "计划已被接受，当前是长任务执行阶段" in prompt
+    assert prompt.index("当前运行阶段（由应用提供）") > prompt.index(
+        "上一轮当前任务状态"
+    )
+    assert "仍须遵守；有真实冲突时请示用户" in prompt
     assert "--- Round 2 auditor report（步骤审计）---" in prompt
     assert "round_id: round_002" in prompt
     assert "- 包含本轮在内的剩余轮次: 23" in prompt
@@ -203,6 +208,8 @@ def test_executor_prompt() -> None:
     assert "分配的子任务合同:\n下一步: 执行任务" in prompt
     assert "(任务管理器没有引用相关报告。)" in prompt
     assert "- Workspace 根目录: /workspace" in prompt
+    assert "计划已被接受，当前是长任务执行阶段" in prompt
+    assert prompt.index("当前运行阶段（由应用提供）") > prompt.index("稳定任务契约:")
     assert "直接调用 artifact_publish（Host 工具，不是沙箱命令）" in prompt
     assert "文件使用 workspace 相对路径" in prompt
     assert "保留真实返回的产物 ID、size_bytes、sha256" in prompt
@@ -237,6 +244,8 @@ def test_auditor_prompt_step_scope() -> None:
     assert "其他步骤: (无)" in prompt  # s1 已 done、s3 已取代
     assert "executor 自然语言输出:\nimported 120" in prompt
     assert "本次审计依据要求版本 v2" in prompt
+    assert "计划已被接受，当前是长任务执行阶段" in prompt
+    assert prompt.index("当前运行阶段（由应用提供）") > prompt.index("稳定任务契约（")
     task_id = "t" * 32
     assert (
         f'evidence_search(query="{task_id}", task_id="{task_id}", '

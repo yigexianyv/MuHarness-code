@@ -68,6 +68,7 @@ from .parsing import (
     clip_preserve,
     parse_control_header,
     parse_manager_output,
+    strip_control_header,
 )
 from .prompts import (
     AuditKind,
@@ -182,6 +183,7 @@ class RunGateway(Protocol):
 
 FinalMessageSink = Callable[[str, str, str], Awaitable[object]]
 RecoveryInfo = Callable[[str], Awaitable[tuple[list[str], list[str]]]]
+ExecutorEvidenceInfo = Callable[[str, str, str], Awaitable[str]]
 
 
 class MeaStartError(ValueError):
@@ -275,6 +277,7 @@ class MeaRunner:
         snapshot_exclude: Sequence[str | Path] = (),
         final_message_sink: FinalMessageSink | None = None,
         recovery_info: RecoveryInfo | None = None,
+        executor_evidence: ExecutorEvidenceInfo | None = None,
         role_timeouts: Mapping[AgentMode, float | None] | None = None,
     ) -> None:
         missing = {AgentMode.MANAGE, AgentMode.EXECUTE, AgentMode.AUDIT} - set(runtimes)
@@ -289,6 +292,7 @@ class MeaRunner:
         self._exclude = tuple(snapshot_exclude)
         self._final_sink = final_message_sink
         self._recovery_info = recovery_info
+        self._executor_evidence = executor_evidence
         self._timeouts = dict(role_timeouts or {})
         self._loop_locks: dict[str, asyncio.Lock] = {}
         self._amend_locks: dict[str, asyncio.Lock] = {}
@@ -1359,6 +1363,41 @@ class MeaRunner:
         related = format_related_reports(views, rnd.related_refs)
         record = ""
         executor_run_id = rnd.executor_run_id
+        candidates = [
+            item for item in rounds
+            if item.index <= rnd.index and item.executor_run_id
+            and (kind is AuditKind.FINAL_AUDIT or item.step_id == rnd.step_id)
+        ]
+        if executor_run_id is None and candidates:
+            executor_run_id = candidates[-1].executor_run_id
+        records: list[str] = []
+        if self._executor_evidence is not None:
+            # Keep referenced original runs when retries only sought evidence.
+            refs = set(rnd.related_refs)
+            selected = sorted(
+                sorted(candidates, key=lambda item: (
+                    item.index == rnd.index, item.ref in refs, item.index,
+                ), reverse=True)[:3],
+                key=lambda item: item.index,
+            )
+            if len(candidates) > len(selected):
+                records.append(
+                    f"另有 {len(candidates) - len(selected)} 个 Executor Run 未附录；"
+                    "以下记录不能代表本步骤或整个任务的全部历史。"
+                )
+            for item in selected:
+                try:
+                    records.append(await self._executor_evidence(
+                        item.executor_run_id, mea.conversation_id, mea.id,
+                    ))
+                except Exception:
+                    logger.exception(
+                        "executor evidence unavailable for %s", item.executor_run_id,
+                    )
+                    records.append(
+                        f"run_id={item.executor_run_id}: "
+                        "运行证据不可用，不能据此证明调用或回复。"
+                    )
         if kind is AuditKind.FINAL_AUDIT:
             for item in task.steps:
                 if item.status is TaskStepStatus.SUPERSEDED and item.superseded_by:
@@ -1409,6 +1448,7 @@ class MeaRunner:
             recovery_record=record,
             related_reports=related,
             executor_run_id=executor_run_id,
+            executor_records="\n".join(records),
         )
 
     # 函数说明：MeaRunner._finalize_audit
@@ -1443,20 +1483,34 @@ class MeaRunner:
                 + "原始输出（不作为通过依据）:\n" + report[:1800]
             )
         header = parse_control_header(report)
-        if header is None and not result.timed_out:
+        kind = AuditKind(rnd.kind.value)
+        scope_valid = _header_matches_scope(header, kind)
+        if (not scope_valid and not result.timed_out
+                and result.ok and not result.truncated):
             repair_before = snapshot_workspace(self._workspace, exclude=self._exclude)
             repaired = await self._run_role(
-                mea, uuid4().hex, AgentMode.MANAGE, build_format_repair_prompt(report)
+                mea, uuid4().hex, AgentMode.MANAGE,
+                build_format_repair_prompt(report, kind=kind),
             )
             repair_diff = snapshot_diff(
                 repair_before, snapshot_workspace(self._workspace, exclude=self._exclude)
             )
             candidate = repaired.text.strip()
-            if (repaired.ok and not repaired.truncated
-                    and not repair_diff.mutated and parse_control_header(candidate) is not None):
-                report = candidate
-                header = parse_control_header(report)
-        if header is None:
+            candidate_header = parse_control_header(candidate)
+            if (repaired.ok and not repaired.truncated and not repair_diff.mutated
+                    and _header_matches_scope(candidate_header, kind)):
+                # A scope correction may change the header, never the recorded findings.
+                report = (
+                    candidate_header.render() + "\n" + strip_control_header(report)
+                    if header is not None else candidate
+                )
+                header = candidate_header
+        if not _header_matches_scope(header, kind):
+            if header is not None:
+                report += (
+                    f"\n\nharness 审计类型不匹配: {kind.value} "
+                    f"不能使用步骤验收 {header.step_acceptance.value}；本轮不通过。"
+                )
             report = invalid_header_report(report)
             header = parse_control_header(report)
         assert header is not None
@@ -2187,13 +2241,21 @@ class MeaRunner:
 #   当 `rnd.integrity_status != Integrity.CLEAN.value` 时，返回 `False`。
 #   当 `rnd.contract_audit_status != ContractAudit.ALIGNED.value` 时，返回 `False`。
 #   当 `final` 时，返回 `rnd.audit_status == AuditStatus.COMPLETE.value`。
+def _header_matches_scope(header: ControlHeader | None, kind: AuditKind) -> bool:
+    if header is None:
+        return False
+    return ((header.step_acceptance is StepAcceptance.NOT_APPLICABLE)
+            == (kind is AuditKind.FINAL_AUDIT))
+
+
 def _passes(rnd: MeaRound, *, final: bool) -> bool:
     if rnd.integrity_status != Integrity.CLEAN.value:
         return False
     if rnd.contract_audit_status != ContractAudit.ALIGNED.value:
         return False
     if final:
-        return rnd.audit_status == AuditStatus.COMPLETE.value
+        return (rnd.audit_status == AuditStatus.COMPLETE.value
+                and rnd.step_acceptance == StepAcceptance.NOT_APPLICABLE.value)
     return rnd.step_acceptance == StepAcceptance.SATISFIED.value
 
 

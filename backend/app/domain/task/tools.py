@@ -491,6 +491,20 @@ class TaskUpdateTool(BaseTool):
         conversation_id = _require_conversation_id(context)
         task = await _resolve_owned(self._store, task_id, conversation_id)
 
+        if (
+            context is not None
+            and context.mode is AgentMode.PLAN
+            and replacement_steps is not None
+        ):
+            previous = {step.id: step.status for step in task.steps}
+            if any(
+                step.status is not previous.get(step.id, TaskStepStatus.TODO)
+                for step in replacement_steps
+            ):
+                raise ValueError("plan mode 下不能通过 steps 改变步骤状态")
+            if expected_revision is None:
+                expected_revision = task.revision
+
         patch_data: dict[str, Any] = {
             "status": status,
             "add_constraints": constraints,
