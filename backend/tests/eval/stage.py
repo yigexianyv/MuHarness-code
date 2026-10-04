@@ -13,7 +13,7 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -238,6 +238,8 @@ class Stage:
     variant: Variant
     paths: StagePaths
     app: Application
+    factory: AppFactory | None = None
+    retired_api_requests: list[dict[str, Any]] = field(default_factory=list)
 
 
 # 函数说明：open_stage
@@ -267,7 +269,7 @@ async def open_stage(
     with patched_env(env):
         write_setup(case, paths)
         application = factory(paths, variant)
-        stage = Stage(case=case, variant=variant, paths=paths, app=application)
+        stage = Stage(case=case, variant=variant, paths=paths, app=application, factory=factory)
         try:
             await application.start()
             install_approval_policy(application, case.approvals)
@@ -280,7 +282,7 @@ async def open_stage(
             yield stage
         finally:
             try:
-                await application.close()
+                await stage.app.close()
             finally:
                 if not keep:
                     shutil.rmtree(root, ignore_errors=True)

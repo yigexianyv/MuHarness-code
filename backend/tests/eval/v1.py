@@ -102,7 +102,9 @@ def source_metadata() -> dict[str, Any]:
     digest = hashlib.sha256()
     for root in (backend / "app", Path(__file__).resolve().parent):
         for path in sorted(root.rglob("*.py")):
-            if "__pycache__" in path.parts:
+            if "__pycache__" in path.parts or (
+                root.name == "eval" and path.relative_to(root).parts[0] == "reports"
+            ):
                 continue
             digest.update(path.relative_to(backend).as_posix().encode())
             digest.update(path.read_bytes())
@@ -233,8 +235,12 @@ async def collect_evidence(stage: Stage, outcome: Outcome) -> dict[str, Any]:
         "runs": exported,
         "histories": histories,
         "tool_evidence": memories,
+        "memory_records": [
+            memory.model_dump(mode="json") for memory in await app.memory_manager.list()
+        ],
         "outcome": outcome.model_dump(mode="json"),
-        "api_requests": list(getattr(adapter, "events", [])),
+        "api_requests": stage.retired_api_requests
+        + list(getattr(adapter, "events", [])),
         "effective": {
             "provider": app.provider,
             "model": app.model,
@@ -613,6 +619,10 @@ async def run_trial(
     folder: Path,
     attempt: int,
     variant: Variant = CURRENT,
+    driver=None,
+    observation_grader=None,
+    case_evaluator=None,
+    runtime_classifier=None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     outcome = Outcome(case_id=plan.case.id, variant=variant.name, attempt=attempt)
@@ -622,12 +632,13 @@ async def run_trial(
     attempted_calls = 0
     usage_complete = False
     api_requests = []
+    evidence = {}
     try:
         async with open_stage(plan.case, variant, factory) as stage:
             before = snapshot(stage.paths.workspace)
             protected_before = _protected(stage, plan.unchanged)
             secrets = _secrets(stage.app)
-            outcome = await drive(stage, attempt=attempt)
+            outcome = await (driver or drive)(stage, attempt=attempt)
             if outcome.status != "ok":
                 for identifier in outcome.conversations.values():
                     await stage.app.mea_runner.cancel_for_conversation(identifier)
@@ -676,7 +687,7 @@ async def run_trial(
             )
             # 原始证据先落盘；后续独立验收失败也能复盘本次 Agent 运行。
             write_json(folder / "evidence.json", evidence, secrets=secrets)
-            runtime = runtime_state(outcome, evidence)
+            runtime = (runtime_classifier or runtime_state)(outcome, evidence)
             if runtime is not None:
                 checks.append(
                     {
@@ -686,8 +697,21 @@ async def run_trial(
                         "detail": runtime[1],
                     }
                 )
+                if observation_grader is not None:
+                    checks.extend(
+                        item for item in (
+                            grade_observations(plan, outcome, evidence)
+                            + observation_grader(plan, outcome, evidence)
+                        )
+                        if item["dimension"] == "safety"
+                    )
             else:
-                for verdict in evaluate(outcome, plan.case.checks):
+                verdicts = (
+                    evaluate(outcome, plan.case.checks)
+                    if case_evaluator is None
+                    else []
+                )
+                for verdict in verdicts:
                     name = verdict.check
                     dimension = (
                         "process"
@@ -704,7 +728,11 @@ async def run_trial(
                             missing=missing,
                         )
                     )
+                if case_evaluator is not None:
+                    checks.extend(case_evaluator(plan, outcome, evidence))
                 checks.extend(grade_observations(plan, outcome, evidence))
+                if observation_grader is not None:
+                    checks.extend(observation_grader(plan, outcome, evidence))
                 if plan.verification is not None:
                     independent = await verify(stage.paths.workspace, plan.verification)
                     write_json(
@@ -781,6 +809,7 @@ async def run_trial(
         "chargeable_tokens": outcome.chargeable_tokens,
         "model_calls": attempted_calls,
         "recorded_model_calls": outcome.model_calls,
+        "tool_calls": len(tool_records(evidence)),
         "usage_complete": usage_complete,
         "api_requests": len(api_requests),
         "api_retries": sum(request["attempt"] > 1 for request in api_requests),
@@ -898,6 +927,11 @@ async def run_v1(
     variant: Variant = CURRENT,
     prerequisite: dict[str, Any] | None = None,
     progress=print,
+    trial_runner=None,
+    schema_version: str = "muharness-eval-v1",
+    grader_version: str | None = None,
+    report_renderer=None,
+    metadata_extra: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path]:
     if repeat < 1:
         raise ValueError("repeat 至少为 1")
@@ -915,7 +949,7 @@ async def run_v1(
     folder.mkdir(parents=True)
     docker = await docker_preflight() if prerequisite is None else prerequisite
     report = {
-        "schema_version": "muharness-eval-v1",
+        "schema_version": schema_version,
         "batch_id": batch,
         "started_at": datetime.now(UTC).isoformat(),
         "repeat": repeat,
@@ -946,6 +980,9 @@ async def run_v1(
         },
         "attempts": [],
     }
+    if grader_version is not None:
+        report["metadata"]["grader_version"] = grader_version
+    report["metadata"].update(metadata_extra or {})
     factory = factory or live_factory(
         provider=provider,
         model=model,
@@ -985,7 +1022,7 @@ async def run_v1(
                 write_json(trial / "preflight.json", docker)
                 write_json(trial / "result.json", row)
             else:
-                row = await run_trial(
+                row = await (trial_runner or run_trial)(
                     plan,
                     factory=factory,
                     folder=trial,
@@ -997,12 +1034,16 @@ async def run_v1(
                 f"完成 {plan.case.id}：{row['status']}（{row['duration_seconds']} 秒）"
             )
             write_json(folder / "report.json", report)
-            (folder / "report.md").write_text(render(report), encoding="utf-8")
+            (folder / "report.md").write_text(
+                (report_renderer or render)(report), encoding="utf-8"
+            )
     report["finished_at"] = datetime.now(UTC).isoformat()
     # 每批留一份不可覆盖的快照；是否作为回归门槛由第二版显式选择。
     write_json(folder / "report.json", report)
     write_json(folder / "baseline.json", report)
-    (folder / "report.md").write_text(render(report), encoding="utf-8")
+    (folder / "report.md").write_text(
+        (report_renderer or render)(report), encoding="utf-8"
+    )
     return report, folder
 
 

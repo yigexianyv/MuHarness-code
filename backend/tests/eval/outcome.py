@@ -133,6 +133,8 @@ class Outcome(BaseModel):
     # 函数说明：Outcome.last
     # 用途：返回 `self.turns[-1] if self.turns else None`，提供 Outcome 的派生值。
     # 返回：类型 `TurnOutcome | None`；返回 `self.turns[-1] if self.turns else None`。
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
     @property
     def last(self) -> TurnOutcome | None:
         return self.turns[-1] if self.turns else None
