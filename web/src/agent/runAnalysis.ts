@@ -9,6 +9,15 @@ export interface ContextBreakdownItem {
   ratio: number
 }
 
+/** 输出过长、模型只收到截短版本的一次工具调用。 */
+export interface TruncatedToolVM {
+  toolCallId: string
+  toolName: string
+  /** 模型实际收到的（截短后的）输出 */
+  modelOutput: string
+  evidenceId: string | null
+}
+
 export interface ContextStepVM {
   step: number
   eventTime: string
@@ -56,6 +65,8 @@ export interface ContextStepVM {
   constraintsPossiblyDropped: string[]
   /** 本步请求实际采用的"必须记住的事项"版本；null 表示未提供。 */
   constraintsRevision: number | null
+  /** 本步工具输出过长被截短的调用（来自实际的工具完成事件）。 */
+  truncatedTools: TruncatedToolVM[]
 }
 
 export interface TraceGroupVM {
@@ -95,6 +106,7 @@ export function mergeRunEvents(
 
 /** 从模型启动事件提取每一步的上下文用量信息。 */
 export function buildContextSteps(events: AgentEvent[]): ContextStepVM[] {
+  const truncatedByStep = collectTruncatedTools(events)
   const pendingByStep = new Map<string, AgentEvent>()
   const completionByStart = new Map<AgentEvent, AgentEvent>()
   for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
@@ -192,8 +204,32 @@ export function buildContextSteps(events: AgentEvent[]): ContextStepVM[] {
         summaryPreviousSnapshot: event.summary_previous_snapshot ?? null,
         constraintsPossiblyDropped: event.constraints_possibly_dropped ?? [],
         constraintsRevision: numberOrNull(event.constraints_revision),
+        truncatedTools: truncatedByStep.get(`${event.run_id}:${event.step}`) ?? [],
       }
     })
+}
+
+/** 按"运行:步骤"汇总被截短的工具输出；同一次工具调用只算一次。 */
+export function collectTruncatedTools(events: AgentEvent[]): Map<string, TruncatedToolVM[]> {
+  const seen = new Set<string>()
+  const byStep = new Map<string, TruncatedToolVM[]>()
+  for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
+    const result = event.tool_result
+    if (event.type !== 'tool_completed' || event.step == null || !result?.output_truncated) continue
+    const key = `${event.run_id}:${result.tool_call_id}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const stepKey = `${event.run_id}:${event.step}`
+    const list = byStep.get(stepKey) ?? []
+    list.push({
+      toolCallId: result.tool_call_id,
+      toolName: result.tool_name,
+      modelOutput: result.output ?? '',
+      evidenceId: result.evidence_id ?? null,
+    })
+    byStep.set(stepKey, list)
+  }
+  return byStep
 }
 
 export type SummaryFieldKey = keyof ConversationSummarySnapshot

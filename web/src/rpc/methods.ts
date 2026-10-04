@@ -20,6 +20,7 @@ export const RpcMethods = {
   runInterrupt: 'run.interrupt',
   runRecover: 'run.recover',
   runContextMessages: 'run.context.messages',
+  runContextEvidence: 'run.context.evidence',
   runStepsList: 'run.steps.list',
   runRewindPreview: 'run.rewind.preview',
   runRewindApply: 'run.rewind.apply',

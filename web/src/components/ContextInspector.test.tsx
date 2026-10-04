@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import type { AgentEvent, ConversationSummarySnapshot } from '../api/types'
-import ContextInspector from './ContextInspector'
+import ContextInspector, { ToolOutputViewer } from './ContextInspector'
 
 function contextEvent(): AgentEvent {
   return {
@@ -199,7 +199,7 @@ describe('ContextInspector 上下文面板', () => {
     expect(html).toContain('时间线')
     expect(html).toContain('──压缩──▶')
     expect(html).toContain('第 1~24 条消息已由摘要替代')
-    expect(html).toContain('3 个工具输出被截短')
+    expect(html).toContain('3 个旧工具结果在请求中被压缩')
     expect(html).toContain('⚠ 1 条约束可能丢失')
     expect(html).toContain('当前摘要（步骤 2 生成）')
     expect(html).toContain('和上一版对比')
@@ -210,5 +210,84 @@ describe('ContextInspector 上下文面板', () => {
   it('长任务子运行不显示必须记住的事项编辑框', () => {
     const html = render(events, null)
     expect(html).not.toContain('必须记住的事项')
+  })
+})
+
+describe('工具输出截短', () => {
+  const toolCompleted = (partial: { sequence: number; step: number; id: string; truncated: boolean }): AgentEvent => ({
+    ...started({ step: partial.step }),
+    event_id: `tool-${partial.sequence}`,
+    sequence: partial.sequence,
+    type: 'tool_completed',
+    tool_result: {
+      tool_call_id: partial.id,
+      tool_name: 'read_file',
+      success: true,
+      output: partial.truncated ? 'HEAD…[truncated]' : 'short',
+      error: null,
+      duration_ms: 1,
+      evidence_id: partial.truncated ? 'abcd1234' : null,
+      output_truncated: partial.truncated ? true : null,
+    },
+  })
+
+  it('根据实际工具完成事件提示截短，并提供两种查看入口', () => {
+    const events = [
+      started({ step: 1, sequence: 1, prepared_input_tokens: 9_000 }),
+      toolCompleted({ sequence: 2, step: 1, id: 'call-long', truncated: true }),
+      // 同一次调用的重复事件只计一次
+      toolCompleted({ sequence: 3, step: 1, id: 'call-long', truncated: true }),
+      toolCompleted({ sequence: 4, step: 1, id: 'call-short', truncated: false }),
+    ]
+    const html = render(events, 'c1')
+    expect(html.match(/输出过长，模型收到截短版本/g)).toHaveLength(1)
+    expect(html).toContain('查看模型收到的内容')
+    expect(html).toContain('查看完整工具原文')
+    // 截短与摘要替代分开显示
+    expect(html).not.toContain('已由摘要替代')
+  })
+
+  it('短输出不提示截短', () => {
+    const html = render(
+      [started({ step: 1, sequence: 1 }), toolCompleted({ sequence: 2, step: 1, id: 'call-short', truncated: false })],
+      'c1',
+    )
+    expect(html).not.toContain('输出过长')
+  })
+})
+
+describe('工具输出查看器', () => {
+  const renderViewer = (node: React.ReactNode, seed: (client: QueryClient) => void = () => {}): string => {
+    const client = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
+    seed(client)
+    return renderToStaticMarkup(<QueryClientProvider client={client}>{node}</QueryClientProvider>)
+  }
+
+  it('完整原文按页显示总长度和下一页', () => {
+    const html = renderViewer(
+      <ToolOutputViewer runId="r1" target={{ kind: 'full', toolCallId: 'call-long', toolName: 'read_file' }} onClose={() => {}} />,
+      (client) => client.setQueryData(['run-tool-evidence', 'r1', 'call-long', 0], {
+        run_id: 'r1', tool_call_id: 'call-long', tool_name: 'read_file', evidence_id: 'abcd1234ef',
+        total_chars: 133_021, offset: 0, content: 'HEAD_MARKER', next_offset: 12_000,
+      }),
+    )
+    expect(html).toContain('read_file：完整工具原文')
+    expect(html).toContain('133,021')
+    expect(html).toContain('HEAD_MARKER')
+    expect(html).toMatch(/<button[^>]*>下一页/)
+    expect(html).not.toMatch(/<button[^>]*disabled=""[^>]*>下一页/)
+  })
+
+  it('模型收到的内容直接显示截短版本，不冒充完整原文', () => {
+    const html = renderViewer(
+      <ToolOutputViewer
+        runId="r1"
+        target={{ kind: 'model', tool: { toolCallId: 'c', toolName: 'read_file', modelOutput: 'HEAD…[truncated]', evidenceId: 'abcd' } }}
+        onClose={() => {}}
+      />,
+    )
+    expect(html).toContain('模型收到的内容（已截短）')
+    expect(html).toContain('HEAD…[truncated]')
+    expect(html).not.toContain('完整工具原文')
   })
 })

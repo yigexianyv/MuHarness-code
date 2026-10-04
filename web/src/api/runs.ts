@@ -12,6 +12,7 @@ import type {
   RewindStepInfo,
   RunContextMessagesPage,
   RunUsageSummary,
+  ToolEvidencePage,
 } from './types'
 
 export interface RunListQuery {
@@ -120,4 +121,17 @@ export async function undoRewind(rewindKey: string): Promise<RewindResult> {
     { rewind_key: rewindKey },
   )
   return response.rewind
+}
+
+/** 分页读取工具调用的完整原文（模型收到的可能是截短版本）。 */
+export async function getRunToolEvidence(
+  runId: string,
+  toolCallId: string,
+  offset: number,
+): Promise<ToolEvidencePage> {
+  return rpcClient.call(RpcMethods.runContextEvidence, {
+    run_id: runId,
+    tool_call_id: toolCallId,
+    offset,
+  })
 }

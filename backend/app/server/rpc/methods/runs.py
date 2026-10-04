@@ -265,6 +265,69 @@ async def run_context_messages(
     }
 
 
+_EVIDENCE_PAGE_MAX_CHARS = 12_000
+_FORK_CHAIN_LIMIT = 20
+
+
+async def run_context_evidence(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """分页读取某次工具调用的完整原文（模型收到的可能是截短版本）。
+
+    只在该运行所属会话、以及它经"重做此步"继承的来源会话里查找，
+    不能凭工具调用 ID 读到无关会话的证据。
+    """
+    run_id = _require_str(params, "run_id")
+    tool_call_id = _require_str(params, "tool_call_id")
+    offset = params.get("offset", 0)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise JsonRpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            "offset must be a non-negative integer",
+        )
+    limit = min(
+        _positive_int(params, "limit", default=_EVIDENCE_PAGE_MAX_CHARS),
+        _EVIDENCE_PAGE_MAX_CHARS,
+    )
+    application = ctx.application
+    run = await application.run_manager.get_run(run_id)
+    if run is None:
+        raise JsonRpcError(RESOURCE_NOT_FOUND, "run not found")
+    if run.conversation_id is None:
+        raise JsonRpcError(RESOURCE_NOT_FOUND, "完整原文不可用：该运行没有关联会话")
+    conversation_ids = [run.conversation_id]
+    rewind_service = getattr(application, "rewind_service", None)
+    current = run.conversation_id
+    while rewind_service is not None and len(conversation_ids) < _FORK_CHAIN_LIMIT:
+        fork = await rewind_service.fork_for(current)
+        if fork is None or fork.source_conversation_id in conversation_ids:
+            break
+        current = fork.source_conversation_id
+        conversation_ids.append(current)
+    document = await application.evidence_store.find_for_tool_call(
+        tool_call_id,
+        conversation_ids=conversation_ids,
+    )
+    if document is None:
+        raise JsonRpcError(
+            RESOURCE_NOT_FOUND,
+            "完整原文不可用：没有找到这次工具调用的证据记录",
+        )
+    content = document.content
+    end = min(len(content), offset + limit)
+    return {
+        "run_id": run_id,
+        "tool_call_id": tool_call_id,
+        "tool_name": document.record.tool_name,
+        "evidence_id": document.record.id,
+        "total_chars": len(content),
+        "offset": offset,
+        "content": content[offset:end],
+        "next_offset": end if end < len(content) else None,
+    }
+
+
 def _rewind_service(ctx: RpcContext) -> RewindService:
     service = ctx.application.rewind_service
     if service is None:
@@ -383,6 +446,7 @@ def register(dispatcher: RpcDispatcher) -> None:
     dispatcher.register("run.interrupt", run_interrupt)
     dispatcher.register("run.recover", run_recover)
     dispatcher.register("run.context.messages", run_context_messages)
+    dispatcher.register("run.context.evidence", run_context_evidence)
     dispatcher.register("run.steps.list", run_steps_list)
     dispatcher.register("run.rewind.preview", run_rewind_preview)
     dispatcher.register("run.rewind.apply", run_rewind_apply)
