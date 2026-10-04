@@ -5,6 +5,7 @@ import { RpcMethods } from '../rpc/methods'
 import type {
   AgentMode,
   Conversation,
+  ConversationConstraints,
   Message,
   SendMessageResponse,
 } from './types'
@@ -68,4 +69,27 @@ export async function sendMessage(
     },
     { timeoutMs: 0 },
   )
+}
+
+export async function getConversationConstraints(
+  conversationId: string,
+): Promise<ConversationConstraints> {
+  const response = await rpcClient.call<{ constraints: ConversationConstraints }>(
+    RpcMethods.conversationConstraintsGet,
+    { conversation_id: conversationId },
+  )
+  return response.constraints
+}
+
+/** 保存新版本；expectedRevision 用于发现别处的并发修改。 */
+export async function setConversationConstraints(
+  conversationId: string,
+  text: string,
+  expectedRevision: number,
+): Promise<ConversationConstraints> {
+  const response = await rpcClient.call<{ constraints: ConversationConstraints }>(
+    RpcMethods.conversationConstraintsSet,
+    { conversation_id: conversationId, text, expected_revision: expectedRevision },
+  )
+  return response.constraints
 }

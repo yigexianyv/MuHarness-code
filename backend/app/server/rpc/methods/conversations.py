@@ -6,7 +6,11 @@ from __future__ import annotations
 from typing import Any
 
 from app.application import title_from_content
-from app.domain.conversation import ConversationSource, TriggerContext
+from app.domain.conversation import (
+    ConstraintsRevisionConflict,
+    ConversationSource,
+    TriggerContext,
+)
 from app.models.types import AgentMode
 
 from ..dispatcher import RpcContext, RpcDispatcher
@@ -218,6 +222,54 @@ async def conversation_delete(
 # 返回：类型 `str`；返回 `value`。
 # 分支与异常：
 #   当 `not isinstance(value, str) or not value` 时，抛出 `JsonRpcError(…)`。
+async def conversation_constraints_get(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    conversation_id = _require_str(params, "conversation_id")
+    try:
+        constraints = await ctx.application.conversation_store.get_constraints(
+            conversation_id
+        )
+    except KeyError as exc:
+        raise JsonRpcError(RESOURCE_NOT_FOUND, "conversation not found") from exc
+    return {"constraints": constraints}
+
+
+async def conversation_constraints_set(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """保存"必须记住的事项"；运行中保存会在下一次模型请求生效。"""
+    conversation_id = _require_str(params, "conversation_id")
+    text = params.get("text")
+    if not isinstance(text, str):
+        raise JsonRpcError(RpcErrorCode.INVALID_PARAMS, "text must be a string")
+    expected_revision = params.get("expected_revision")
+    if expected_revision is not None and (
+        not isinstance(expected_revision, int)
+        or isinstance(expected_revision, bool)
+        or expected_revision < 0
+    ):
+        raise JsonRpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            "expected_revision must be a non-negative integer",
+        )
+    try:
+        constraints = await ctx.application.conversation_store.set_constraints(
+            conversation_id,
+            text,
+            expected_revision=expected_revision,
+        )
+    except KeyError as exc:
+        raise JsonRpcError(RESOURCE_NOT_FOUND, "conversation not found") from exc
+    except ConstraintsRevisionConflict as exc:
+        raise JsonRpcError(INVALID_STATE, str(exc)) from exc
+    except ValueError as exc:
+        raise JsonRpcError(RpcErrorCode.INVALID_PARAMS, str(exc)) from exc
+    return {"constraints": constraints}
+
+
 def _require_str(params: dict[str, Any], key: str) -> str:
     value = params.get(key)
     if not isinstance(value, str) or not value:
@@ -259,3 +311,5 @@ def register(dispatcher: RpcDispatcher) -> None:
     dispatcher.register("conversation.send", conversation_send)
     dispatcher.register("conversation.rename", conversation_rename)
     dispatcher.register("conversation.delete", conversation_delete)
+    dispatcher.register("conversation.constraints.get", conversation_constraints_get)
+    dispatcher.register("conversation.constraints.set", conversation_constraints_set)

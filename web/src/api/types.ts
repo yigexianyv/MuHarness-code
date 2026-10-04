@@ -260,7 +260,48 @@ export interface AgentEvent {
   skill_catalog_tokens?: number | null
   active_skill_names?: string[]
   active_skill_tokens?: number | null
+  source_message_count?: number | null
+  summary_covered_before?: number | null
+  summary_covered_after?: number | null
+  summary_snapshot?: ConversationSummarySnapshot | null
+  summary_previous_snapshot?: ConversationSummarySnapshot | null
+  constraints_possibly_dropped?: string[]
+  constraints_revision?: number | null
   [key: string]: unknown
+}
+
+/** 滚动摘要的 7 个字段，与后端 RollingConversationSummary 一致。 */
+export interface ConversationSummarySnapshot {
+  current_objective: string | null
+  user_constraints: string[]
+  key_decisions: string[]
+  completed_work: string[]
+  current_state: string[]
+  pending_work: string[]
+  important_facts: string[]
+}
+
+/** 会话"必须记住的事项"：每次请求都附带，不参与压缩。 */
+export interface ConversationConstraints {
+  conversation_id: string
+  text: string
+  revision: number
+  updated_at: string | null
+}
+
+export interface RunContextMessage {
+  index: number
+  message: Message
+  inherited: boolean
+}
+
+export interface RunContextMessagesPage {
+  run_id: string
+  conversation_id: string | null
+  inherited_count: number
+  total: number
+  offset: number
+  messages: RunContextMessage[]
 }
 
 export type AutomationStatus = 'active' | 'paused' | 'completed' | 'cancelled'

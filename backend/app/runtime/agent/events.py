@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -147,6 +148,13 @@ class AgentEvent(BaseModel):
     prefix_rebuild_reason: str | None = None
     compact_ceiling_tokens: int | None = Field(default=None, ge=0)
     forced_target_tokens: int | None = Field(default=None, ge=0)
+    source_message_count: int | None = Field(default=None, ge=0)
+    summary_covered_before: int | None = Field(default=None, ge=0)
+    summary_covered_after: int | None = Field(default=None, ge=0)
+    summary_snapshot: dict[str, Any] | None = None
+    summary_previous_snapshot: dict[str, Any] | None = None
+    constraints_possibly_dropped: tuple[str, ...] = ()
+    constraints_revision: int | None = Field(default=None, ge=0)
     run_budget_status: str | None = None
     run_budget_reason: str | None = None
     run_budget_chargeable_tokens: int | None = Field(default=None, ge=0)

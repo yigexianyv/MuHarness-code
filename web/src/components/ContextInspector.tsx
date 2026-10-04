@@ -1,14 +1,333 @@
 
 
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 
-import type { AgentEvent } from '../api/types'
+import { getConversationConstraints, setConversationConstraints } from '../api/conversations'
+import { getRunContextMessages } from '../api/runs'
+import type { AgentEvent, Message } from '../api/types'
 import {
   buildContextSteps,
+  diffSummary,
+  effectiveSummary,
+  newlyCoveredRange,
+  SUMMARY_FIELDS,
+  summaryEntries,
   type ContextStepVM,
 } from '../agent/runAnalysis'
 import { formatCacheHitRate, formatTokens } from '../agent/turnPresentation'
+import { toast } from '../stores/toasts'
 import { EmptyState } from './ui'
+
+interface MessageRange {
+  from: number
+  to: number
+  title: string
+}
+
+/** 面向用户的消息编号从 1 开始。 */
+function rangeLabel(from: number, to: number): string {
+  return to - from <= 1 ? `第 ${from + 1} 条` : `第 ${from + 1}~${to} 条`
+}
+
+function UsageBar({ step }: { step: ContextStepVM }): React.JSX.Element {
+  const limit = step.workingInputBudget || step.inputBudget || step.contextWindow
+  const remaining = Math.max(0, limit - step.preparedInputTokens)
+  return (
+    <section className="context-section">
+      <div className="context-section__heading">
+        <h3>当前用量（估算）</h3>
+        <span className="context-stage mono">
+          {formatTokens(step.preparedInputTokens)} / {formatTokens(limit)} · 剩 {formatTokens(remaining)}
+        </span>
+      </div>
+      <progress
+        className="context-window-progress"
+        max={Math.max(1, limit)}
+        value={Math.min(step.preparedInputTokens, Math.max(1, limit))}
+        aria-label="当前上下文用量"
+      />
+    </section>
+  )
+}
+
+function ContextTimeline({
+  steps,
+  selected,
+  onSelect,
+  onOpenRange,
+}: {
+  steps: ContextStepVM[]
+  selected: number
+  onSelect: (step: number) => void
+  onOpenRange: (range: MessageRange) => void
+}): React.JSX.Element {
+  return (
+    <section className="context-section">
+      <h3>时间线</h3>
+      <ol className="context-timeline">
+        {steps.map((step) => {
+          const covered = newlyCoveredRange(step)
+          const compacted = step.compactionStage !== 'none' || step.summaryUpdated || covered !== null
+          return (
+            <li key={step.step} className={step.step === selected ? 'active' : ''}>
+              <button type="button" className="context-timeline__head" onClick={() => onSelect(step.step)}>
+                <span>步骤 {step.step}</span>
+                <span className="mono">
+                  {compacted && step.originalInputTokens !== step.preparedInputTokens
+                    ? <>{formatTokens(step.originalInputTokens)} <em>──压缩──▶</em> {formatTokens(step.preparedInputTokens)}</>
+                    : formatTokens(step.preparedInputTokens)}
+                </span>
+                {step.constraintsPossiblyDropped.length > 0
+                  ? <span className="context-timeline__alert">⚠ {step.constraintsPossiblyDropped.length} 条约束可能丢失</span>
+                  : null}
+              </button>
+              {covered || step.compactedToolResults > 0 || step.removedToolRounds > 0 || step.summaryError ? (
+                <ul className="context-timeline__details">
+                  {covered ? (
+                    <li>
+                      · {rangeLabel(covered.from, covered.to)}消息已由摘要替代{' '}
+                      <button
+                        type="button"
+                        className="context-link"
+                        onClick={() => onOpenRange({
+                          ...covered,
+                          title: `步骤 ${step.step}：${rangeLabel(covered.from, covered.to)}已由摘要替代的消息`,
+                        })}
+                      >
+                        查看原文
+                      </button>
+                    </li>
+                  ) : null}
+                  {step.compactedToolResults > 0 ? (
+                    <li>
+                      · {step.compactedToolResults} 个工具输出被截短
+                      {step.sourceMessageCount !== null ? (
+                        <>
+                          {' '}
+                          <button
+                            type="button"
+                            className="context-link"
+                            onClick={() => onOpenRange({
+                              from: 0,
+                              to: step.sourceMessageCount!,
+                              title: `步骤 ${step.step}：请求前的全部原始消息（工具输出为完整原文）`,
+                            })}
+                          >
+                            查看原文
+                          </button>
+                        </>
+                      ) : null}
+                    </li>
+                  ) : null}
+                  {step.removedToolRounds > 0 ? <li>· {step.removedToolRounds} 个旧工具轮已移出请求</li> : null}
+                  {step.summaryError ? <li className="context-warning">· 摘要更新失败：{step.summaryError}</li> : null}
+                </ul>
+              ) : null}
+            </li>
+          )
+        })}
+      </ol>
+      <p className="context-note">压缩只影响发给模型的请求，原始消息仍完整保存，可随时查看原文。</p>
+    </section>
+  )
+}
+
+function SummaryPanel({
+  steps,
+  step,
+  canPin,
+}: {
+  steps: ContextStepVM[]
+  step: ContextStepVM
+  canPin: boolean
+}): React.JSX.Element {
+  const [compare, setCompare] = useState(false)
+  const effective = effectiveSummary(steps, step.step)
+  const canCompare = step.summaryPreviousSnapshot !== null && step.summarySnapshot !== null
+  const showDiff = compare && canCompare
+  const diffs = showDiff ? diffSummary(step.summaryPreviousSnapshot, step.summarySnapshot) : []
+
+  return (
+    <section className="context-section">
+      <div className="context-section__heading">
+        <h3>{effective ? `当前摘要（步骤 ${effective.fromStep} ${effective.fromStep === step.step && step.summaryUpdated ? '生成' : '采用'}）` : '当前摘要'}</h3>
+        {canCompare ? (
+          <button type="button" className="context-link" onClick={() => setCompare((value) => !value)}>
+            {showDiff ? '只看新版' : '和上一版对比'}
+          </button>
+        ) : null}
+      </div>
+      {!effective ? (
+        <p className="context-muted">还没有摘要：所有原始消息都直接发给模型。</p>
+      ) : showDiff ? (
+        <dl className="context-summary-fields">
+          {diffs.map((field) => (
+            <div key={field.key}>
+              <dt>{field.label}</dt>
+              <dd>
+                {field.kept.length + field.added.length + field.removed.length === 0 ? <span className="context-muted">（暂无）</span> : null}
+                {field.kept.map((entry) => <div key={`k-${entry}`}>{entry}</div>)}
+                {field.added.map((entry) => <div key={`a-${entry}`} className="context-diff-added">+ {entry}</div>)}
+                {field.removed.map((entry) => <div key={`r-${entry}`} className="context-diff-removed">− {entry}</div>)}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <dl className="context-summary-fields">
+          {SUMMARY_FIELDS.map((field) => {
+            const entries = summaryEntries(effective.snapshot, field.key)
+            return (
+              <div key={field.key}>
+                <dt>{field.label}</dt>
+                <dd>
+                  {entries.length === 0 ? <span className="context-muted">（暂无）</span> : entries.map((entry) => <div key={entry}>{entry}</div>)}
+                </dd>
+              </div>
+            )
+          })}
+        </dl>
+      )}
+      {step.constraintsPossiblyDropped.length > 0 ? (
+        <div className="context-alert" role="alert">
+          <strong>⚠ 压缩后，这些约束文字不在新摘要里（可能遗漏或被改写），请核对：</strong>
+          <ul>
+            {step.constraintsPossiblyDropped.map((entry) => <li key={entry}>"{entry}"</li>)}
+          </ul>
+          {canPin ? <p>需要一直生效的约定，请写进下方"必须记住的事项"。</p> : null}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+function messagePreview(message: Message): string {
+  const parts: string[] = []
+  if (message.content) parts.push(message.content)
+  for (const call of message.tool_calls ?? []) {
+    const args = typeof call.arguments === 'string' ? call.arguments : JSON.stringify(call.arguments)
+    parts.push(`→ 调用 ${call.name}(${args})`)
+  }
+  return parts.join('\n') || '（空）'
+}
+
+const RAW_PAGE_SIZE = 20
+
+function RawMessagesViewer({
+  runId,
+  range,
+  onClose,
+}: {
+  runId: string
+  range: MessageRange
+  onClose: () => void
+}): React.JSX.Element {
+  const [offset, setOffset] = useState(range.from)
+  useEffect(() => setOffset(range.from), [range.from, range.to])
+  const limit = Math.max(1, Math.min(RAW_PAGE_SIZE, range.to - offset))
+  const query = useQuery({
+    queryKey: ['run-context-messages', runId, offset, limit],
+    queryFn: () => getRunContextMessages(runId, offset, limit),
+  })
+  const items = query.data?.messages ?? []
+  const pageEnd = offset + items.length
+  return (
+    <section className="context-section context-raw" aria-label="原文">
+      <div className="context-section__heading">
+        <h3>{range.title}</h3>
+        <button type="button" className="context-link" onClick={onClose}>收起</button>
+      </div>
+      {query.isPending ? <p className="context-muted">正在读取原文…</p>
+        : query.isError ? <p className="context-warning">{query.error instanceof Error ? query.error.message : String(query.error)}</p>
+          : items.length === 0 ? <p className="context-muted">这一段没有记录到原文。</p>
+            : (
+              <ol className="context-raw__list">
+                {items.map((item) => (
+                  <li key={item.index}>
+                    <div className="context-raw__meta mono">
+                      #{item.index + 1} · {item.message.role}
+                      {item.message.name ? ` · ${item.message.name}` : ''}
+                      {item.inherited ? ' · 来自之前的会话' : ''}
+                    </div>
+                    <pre>{messagePreview(item.message)}</pre>
+                  </li>
+                ))}
+              </ol>
+            )}
+      <div className="context-raw__pager">
+        <button type="button" className="btn btn-sm" disabled={offset <= range.from} onClick={() => setOffset(Math.max(range.from, offset - RAW_PAGE_SIZE))}>上一页</button>
+        <span className="mono">{items.length > 0 ? `${offset + 1}–${pageEnd} / ${range.to}` : ''}</span>
+        <button type="button" className="btn btn-sm" disabled={pageEnd >= range.to || items.length === 0} onClick={() => setOffset(pageEnd)}>下一页</button>
+      </div>
+    </section>
+  )
+}
+
+function PinnedConstraintsEditor({
+  conversationId,
+  adoptedRevision,
+}: {
+  conversationId: string
+  adoptedRevision: number | null
+}): React.JSX.Element {
+  const queryClient = useQueryClient()
+  const queryKey = ['conversation-constraints', conversationId]
+  const query = useQuery({ queryKey, queryFn: () => getConversationConstraints(conversationId) })
+  const [draft, setDraft] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const current = query.data
+  const text = draft ?? current?.text ?? ''
+  const dirty = current !== undefined && draft !== null && draft.trim() !== current.text
+
+  const save = async (): Promise<void> => {
+    if (!current) return
+    setSaving(true)
+    try {
+      const saved = await setConversationConstraints(conversationId, text, current.revision)
+      queryClient.setQueryData(queryKey, saved)
+      setDraft(null)
+      toast.success(`已保存第 ${saved.revision} 版，从下一次模型请求开始生效`)
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause))
+      void queryClient.invalidateQueries({ queryKey })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="context-section">
+      <div className="context-section__heading">
+        <h3>必须记住的事项</h3>
+        <span className="context-stage mono">{current ? `v${current.revision}` : ''}</span>
+      </div>
+      <p className="context-note">每次请求都会带上，不会被压缩；与较早的历史冲突时以此为准。</p>
+      {query.isError ? <p className="context-warning">{query.error instanceof Error ? query.error.message : String(query.error)}</p> : null}
+      <textarea
+        className="textarea context-constraints__input"
+        rows={4}
+        value={text}
+        disabled={!current || saving}
+        placeholder={'每行一条，例如：\n只修改 backend 目录\n不要修改数据库结构'}
+        onChange={(event) => setDraft(event.target.value)}
+        aria-label="必须记住的事项"
+      />
+      <div className="context-constraints__footer">
+        <button type="button" className="btn btn-primary btn-sm" disabled={!dirty || saving} onClick={() => void save()}>
+          {saving ? '保存中…' : '保存'}
+        </button>
+        <span className="context-note">保存后从下一次模型请求开始生效</span>
+      </div>
+      {current ? (
+        <p className="context-note">
+          所选步骤实际采用：{adoptedRevision === null ? '未记录' : adoptedRevision === 0 ? '无（v0）' : `v${adoptedRevision}`}
+          （当前最新：v{current.revision}）
+        </p>
+      ) : null}
+    </section>
+  )
+}
 
 function TokenTransition({ before, after }: { before: number; after: number }): React.JSX.Element {
   return (
@@ -98,11 +417,18 @@ function CompactionList({ step }: { step: ContextStepVM }): React.JSX.Element {
 
 export default function ContextInspector({
   events,
+  runId,
+  conversationId,
 }: {
   events: AgentEvent[]
+  /** 提供后可查看原文。 */
+  runId?: string
+  /** 提供后显示"必须记住的事项"编辑框；长任务的子运行不传。 */
+  conversationId?: string | null
 }): React.JSX.Element {
   const steps = useMemo(() => buildContextSteps(events), [events])
   const [selectedStep, setSelectedStep] = useState<number | null>(null)
+  const [openRange, setOpenRange] = useState<MessageRange | null>(null)
   const selected = steps.find((step) => step.step === selectedStep) ?? steps.at(-1)
 
   useEffect(() => {
@@ -113,7 +439,12 @@ export default function ContextInspector({
   }, [selectedStep, steps])
 
   if (!selected) {
-    return <EmptyState title="暂无 Context 数据" hint="模型请求开始后会记录上下文构成。" />
+    return (
+      <div className="context-inspector">
+        <EmptyState title="暂无 Context 数据" hint="模型请求开始后会记录上下文构成。" />
+        {conversationId ? <PinnedConstraintsEditor conversationId={conversationId} adoptedRevision={null} /> : null}
+      </div>
+    )
   }
 
   return (
@@ -134,6 +465,21 @@ export default function ContextInspector({
           ))}
         </div>
       </div>
+
+      <UsageBar step={selected} />
+      <ContextTimeline
+        steps={steps}
+        selected={selected.step}
+        onSelect={setSelectedStep}
+        onOpenRange={setOpenRange}
+      />
+      {openRange && runId ? (
+        <RawMessagesViewer runId={runId} range={openRange} onClose={() => setOpenRange(null)} />
+      ) : null}
+      <SummaryPanel key={selected.step} steps={steps} step={selected} canPin={Boolean(conversationId)} />
+      {conversationId ? (
+        <PinnedConstraintsEditor conversationId={conversationId} adoptedRevision={selected.constraintsRevision} />
+      ) : null}
 
       <section className="context-section">
         <h3>Context</h3>

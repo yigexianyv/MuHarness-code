@@ -28,4 +28,15 @@ class ConversationMessageRecord(BaseModel):
     created_at: datetime
 
 
-__all__ = ["Conversation", "ConversationMessageRecord"]
+class ConversationConstraints(BaseModel):
+    """会话的"必须记住的事项"：每次请求都附带，不参与压缩。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    conversation_id: str
+    text: str = ""
+    revision: int = Field(default=0, ge=0)
+    updated_at: datetime | None = None
+
+
+__all__ = ["Conversation", "ConversationConstraints", "ConversationMessageRecord"]

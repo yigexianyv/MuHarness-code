@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.domain.memory import (
     MemoryManager,
@@ -64,6 +64,29 @@ from .runtime_helpers import (
 )
 from .tool_hooks import AgentEventHook
 from .tool_round_executor import ToolRoundExecutor
+
+if TYPE_CHECKING:
+    from app.runtime.run.messages_store import RunMessageRecorder
+
+# 读取会话"必须记住的事项"：返回（正文，版本号）。
+ConstraintsProvider = Callable[[str], Awaitable[tuple[str, int]]]
+PINNED_CONSTRAINTS_MESSAGE_NAME = "muharness_pinned_constraints"
+
+
+def pinned_constraints_message(text: str, revision: int) -> Message:
+    """用户维护的约定；每次请求都附带、不参与压缩，与旧历史冲突时以此为准。"""
+    return Message(
+        role=MessageRole.SYSTEM,
+        name=PINNED_CONSTRAINTS_MESSAGE_NAME,
+        content=(
+            f"# 必须记住的事项（用户维护，第 {revision} 版）\n"
+            "以下是用户为本会话设定的当前有效约定，每次请求都会附带，不会被压缩。"
+            "与较早的历史或摘要冲突时以此为准；它不能覆盖系统规则与安全限制。\n"
+            "<pinned_constraints>\n"
+            f"{text.strip()}\n"
+            "</pinned_constraints>"
+        ),
+    )
 
 _PLAN_MODE_SYSTEM_MESSAGE = (
     "# 运行模式：PLAN MODE\n"
@@ -163,6 +186,7 @@ class AgentLoop:
         skill_store: SkillStore | None,
         skill_context_provider: SkillContextProvider | None,
         run_budget: RunBudget,
+        constraints_provider: ConstraintsProvider | None = None,
     ) -> None:
         self._model_registry = model_registry
         self._tool_registry = tool_registry
@@ -180,6 +204,7 @@ class AgentLoop:
         self._skill_store = skill_store
         self._skill_context_provider = skill_context_provider
         self._run_budget = run_budget
+        self._constraints_provider = constraints_provider
         self._tool_round_executor = ToolRoundExecutor(
             registry=tool_registry,
             executor=tool_executor,
@@ -233,6 +258,7 @@ class AgentLoop:
         mode: AgentMode,
         tool_context_metadata: Mapping[str, Any] | None = None,
         tool_result_views: Sequence[ToolResultView] = (),
+        message_recorder: RunMessageRecorder | None = None,
     ) -> AgentResult:
         """驱动模型与工具；原始历史保持完整，模型视图只在压缩边界重建。"""
         tool_event_hook = AgentEventHook(emitter)
@@ -305,6 +331,21 @@ class AgentLoop:
         response_repair_message: Message | None = None
         request_prefix_state: RequestPrefixState | None = None
         failed_compaction_source: tuple[Message, ...] | None = None
+        pinned_constraints: tuple[str, int] | None = None
+        summary_baseline_emitted = False
+
+        async def record_messages() -> None:
+            if message_recorder is not None:
+                await message_recorder.sync(messages)
+
+        async def load_pinned_constraints() -> tuple[str, int] | None:
+            # 读取失败时沿用上一次读到的版本，不中断运行。
+            if self._constraints_provider is None or conversation_id is None:
+                return None
+            try:
+                return await self._constraints_provider(conversation_id)
+            except Exception:
+                return pinned_constraints
 
         await emitter.emit(
             AgentEventType.AGENT_STARTED,
@@ -435,6 +476,7 @@ class AgentLoop:
                         step=step,
                         **run_budget_event_fields(budget_decision, budget_config),
                     )
+            await record_messages()
             if self._checkpoint_store is not None:
                 await self._checkpoint_store.before_model(run_id, step=step)
             tool_round_limit_reached = (
@@ -523,6 +565,12 @@ class AgentLoop:
                     trailing_system_messages=tuple(trailing_system_messages),
                 )
                 context_messages = context_injection.messages
+                pinned_constraints = await load_pinned_constraints()
+                if pinned_constraints is not None and pinned_constraints[0].strip():
+                    context_messages = (
+                        pinned_constraints_message(*pinned_constraints),
+                        *context_messages,
+                    )
                 if context_messages:
                     request_messages = (
                         *request_messages[:request_historical_message_count],
@@ -615,6 +663,7 @@ class AgentLoop:
                 else 0
             )
             context_input_messages = continuation_messages or request_messages
+            summary_state_before = current_summary_state
             try:
                 context_decision = await self._context_manager.prepare(
                     context_input_messages,
@@ -757,6 +806,13 @@ class AgentLoop:
                 if prefix_decision == "append":
                     prefix_decision = "rebuild"
                     prefix_rebuild_reason = "request_config_changed"
+            summary_fields = _summary_event_fields(
+                before=summary_state_before,
+                after=context_decision.summary_state,
+                summary_updated=context_decision.summary_updated,
+                include_baseline=not summary_baseline_emitted,
+            )
+            summary_baseline_emitted = True
             await emitter.emit(
                 AgentEventType.MODEL_STARTED,
                 step=step,
@@ -825,6 +881,11 @@ class AgentLoop:
                 prefix_rebuild_reason=prefix_rebuild_reason,
                 compact_ceiling_tokens=context_decision.compact_ceiling_tokens,
                 forced_target_tokens=context_decision.forced_target_tokens,
+                source_message_count=len(raw_source_messages),
+                constraints_revision=(
+                    pinned_constraints[1] if pinned_constraints is not None else None
+                ),
+                **summary_fields,
                 **run_budget_event_fields(budget_decision, budget_config),
             )
             if context_decision.exceeds_input_budget:
@@ -1084,6 +1145,7 @@ class AgentLoop:
                     tool_result_views=tool_view_state.snapshot(messages),
                 )
 
+            await record_messages()
             round_outcome = await self._tool_round_executor.execute(
                 tool_calls_in_message,
                 run_id=run_id,
@@ -1103,6 +1165,7 @@ class AgentLoop:
             )
             tool_calls.extend(round_outcome.records)
             messages.extend(round_outcome.result_messages)
+            await record_messages()
             previous_signature = round_outcome.previous_signature
             repeated_count = round_outcome.repeated_count
             plan_task_created = plan_task_created or round_outcome.plan_task_created
@@ -1235,4 +1298,39 @@ class AgentLoop:
         )
 
 
-__all__ = ["AgentLoop"]
+def _summary_event_fields(
+    *,
+    before: ConversationSummaryState | None,
+    after: ConversationSummaryState | None,
+    summary_updated: bool,
+    include_baseline: bool,
+) -> dict[str, Any]:
+    """上下文面板需要的压缩数据：覆盖范围、摘要快照和可能丢失的约束。
+
+    快照只在摘要更新时附带；每次运行的第一步附带一份初始摘要作为对比基线。
+    """
+    fields: dict[str, Any] = {
+        "summary_covered_before": (
+            before.covered_message_count if before is not None else 0
+        ),
+        "summary_covered_after": (
+            after.covered_message_count if after is not None else 0
+        ),
+    }
+    if after is not None and (summary_updated or include_baseline):
+        fields["summary_snapshot"] = after.summary.model_dump(mode="json")
+    if summary_updated and before is not None and after is not None:
+        fields["summary_previous_snapshot"] = before.summary.model_dump(mode="json")
+        kept = set(after.summary.user_constraints)
+        fields["constraints_possibly_dropped"] = tuple(
+            entry for entry in before.summary.user_constraints if entry not in kept
+        )
+    return fields
+
+
+__all__ = [
+    "PINNED_CONSTRAINTS_MESSAGE_NAME",
+    "AgentLoop",
+    "ConstraintsProvider",
+    "pinned_constraints_message",
+]

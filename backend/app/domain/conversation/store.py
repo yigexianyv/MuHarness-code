@@ -15,7 +15,7 @@ import aiosqlite
 from app.models.types import Message, ToolCall
 from app.paths import default_database_path
 
-from .models import Conversation, ConversationMessageRecord
+from .models import Conversation, ConversationConstraints, ConversationMessageRecord
 
 if TYPE_CHECKING:
     from app.runtime.context.summary import ConversationSummaryState
@@ -76,7 +76,28 @@ CREATE TABLE IF NOT EXISTS tool_result_views (
     PRIMARY KEY(conversation_id, source_sequence),
     FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS conversation_constraints (
+    conversation_id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
 """
+
+MAX_CONSTRAINTS_CHARS = 4000
+
+
+class ConstraintsRevisionConflict(ValueError):
+    """保存时的基准版本已过期：别处已经改过"必须记住的事项"。"""
+
+    def __init__(self, expected: int, actual: int) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"必须记住的事项已被更新（当前第 {actual} 版），请刷新后再保存"
+        )
 
 
 class SQLiteConversationStore:
@@ -664,6 +685,86 @@ class SQLiteConversationStore:
     # `RuntimeError('重命名会话后无法重新读取会话')`。
     # 副作用与资源：
     #   数据库操作：UPDATE conversations；连接与事务边界以 with/提交语句为准。
+    async def get_constraints(self, conversation_id: str) -> ConversationConstraints:
+        """读取"必须记住的事项"；从未设置时返回空文本、第 0 版。"""
+        async with self._connect() as database:
+            cursor = await database.execute(
+                """
+                SELECT text, revision, updated_at
+                FROM conversation_constraints
+                WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            if await self.get(conversation_id) is None:
+                raise KeyError(f"会话不存在：{conversation_id}")
+            return ConversationConstraints(conversation_id=conversation_id)
+        return ConversationConstraints(
+            conversation_id=conversation_id,
+            text=row["text"],
+            revision=row["revision"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    async def constraints_for_request(self, conversation_id: str) -> tuple[str, int]:
+        """供 AgentLoop 每次组装请求时读取最新版本。"""
+        constraints = await self.get_constraints(conversation_id)
+        return constraints.text, constraints.revision
+
+    async def set_constraints(
+        self,
+        conversation_id: str,
+        text: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> ConversationConstraints:
+        """保存新版本；运行中保存也会在下一次模型请求生效。"""
+        normalized = text.replace("\r\n", "\n").strip()
+        if len(normalized) > MAX_CONSTRAINTS_CHARS:
+            raise ValueError(f"必须记住的事项不能超过 {MAX_CONSTRAINTS_CHARS} 个字符")
+        now = _now_iso()
+        async with self._connect() as database:
+            await database.execute("BEGIN IMMEDIATE")
+            cursor = await database.execute(
+                "SELECT 1 FROM conversations WHERE id = ?",
+                (conversation_id,),
+            )
+            if await cursor.fetchone() is None:
+                await database.rollback()
+                raise KeyError(f"会话不存在：{conversation_id}")
+            cursor = await database.execute(
+                """
+                SELECT text, revision FROM conversation_constraints
+                WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            )
+            row = await cursor.fetchone()
+            current_text = row["text"] if row is not None else ""
+            current = row["revision"] if row is not None else 0
+            if expected_revision is not None and expected_revision != current:
+                await database.rollback()
+                raise ConstraintsRevisionConflict(expected_revision, current)
+            if normalized == current_text:
+                await database.rollback()
+                return await self.get_constraints(conversation_id)
+            await database.execute(
+                """
+                INSERT INTO conversation_constraints (
+                    conversation_id, text, revision, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    text = excluded.text,
+                    revision = excluded.revision,
+                    updated_at = excluded.updated_at
+                """,
+                (conversation_id, normalized, current + 1, now),
+            )
+            await database.commit()
+        return await self.get_constraints(conversation_id)
+
     async def rename(self, conversation_id: str, title: str) -> Conversation:
 
         now = _now_iso()
