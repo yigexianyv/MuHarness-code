@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 import type { AgentEvent, ConversationSummarySnapshot } from '../api/types'
+import { buildContextSteps } from '../agent/runAnalysis'
 import ContextInspector, { ToolOutputViewer } from './ContextInspector'
 
 function contextEvent(): AgentEvent {
@@ -245,6 +246,44 @@ describe('工具输出截短', () => {
     expect(html).toContain('查看完整工具原文')
     // 截短与摘要替代分开显示
     expect(html).not.toContain('已由摘要替代')
+  })
+
+  it('执行器没截短、但模型只收到摘录时也提示，并显示实际摘录', () => {
+    const events = [
+      started({ step: 1, sequence: 1 }),
+      toolCompleted({ sequence: 2, step: 1, id: 'call-mid', truncated: false }),
+      {
+        ...started({ step: 2, sequence: 3 }),
+        tool_output_excerpts: [
+          { tool_call_id: 'call-mid', tool_name: 'read_file', output_chars: 15_023, model_output: 'HEAD…[excerpt]…TAIL' },
+        ],
+      },
+      // 后续步骤不会重复上报同一次调用
+      started({ step: 3, sequence: 4 }),
+    ]
+    const steps = buildContextSteps(events)
+    expect(steps.find((s) => s.step === 1)?.truncatedTools).toEqual([
+      { toolCallId: 'call-mid', toolName: 'read_file', modelOutput: 'HEAD…[excerpt]…TAIL', evidenceId: null },
+    ])
+    expect(steps.filter((s) => s.step !== 1).every((s) => s.truncatedTools.length === 0)).toBe(true)
+    expect(render(events, 'c1').match(/输出过长，模型收到截短版本/g)).toHaveLength(1)
+  })
+
+  it('执行器截短后又被摘录时，模型收到的内容取摘录', () => {
+    const events = [
+      started({ step: 1, sequence: 1 }),
+      toolCompleted({ sequence: 2, step: 1, id: 'call-long', truncated: true }),
+      {
+        ...started({ step: 2, sequence: 3 }),
+        tool_output_excerpts: [
+          { tool_call_id: 'call-long', tool_name: 'read_file', output_chars: 20_000, model_output: 'HEAD…[excerpt]' },
+        ],
+      },
+    ]
+    const tools = buildContextSteps(events).flatMap((s) => s.truncatedTools)
+    expect(tools).toEqual([
+      { toolCallId: 'call-long', toolName: 'read_file', modelOutput: 'HEAD…[excerpt]', evidenceId: 'abcd1234' },
+    ])
   })
 
   it('短输出不提示截短', () => {

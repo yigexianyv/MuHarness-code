@@ -320,7 +320,7 @@ function RawMessagesViewer({
         <h3>{range.title}</h3>
         <button type="button" className="context-link" onClick={onClose}>收起</button>
       </div>
-      <p className="context-note">这里是模型收到的消息；过长的工具输出在这里是截短版，完整内容点"查看完整工具原文"。</p>
+      <p className="context-note">这里是会话记录里的消息；过长的工具输出只存了截短版，模型请求里可能只看到其中开头和结尾，完整内容点"查看完整工具原文"。</p>
       {query.isPending ? <p className="context-muted">正在读取原文…</p>
         : query.isError ? <p className="context-warning">{query.error instanceof Error ? query.error.message : String(query.error)}</p>
           : items.length === 0 ? <p className="context-muted">这一段没有记录到原文。</p>

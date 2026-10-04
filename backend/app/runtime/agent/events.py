@@ -9,6 +9,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.types import Message, ModelUsage, ToolCall, ToolResult
+from app.runtime.context.tool_views import ToolOutputExcerpt
 from app.tools.approval import ApprovalDecision
 
 from .result import AgentError, AgentResult, AgentStopReason
@@ -121,6 +122,8 @@ class AgentEvent(BaseModel):
     reflection_mutation_applied: bool | None = None
     reflection_maintenance_required: bool | None = None
     reflection_retention_candidate_ids: tuple[str, ...] = ()
+    # 本步请求里首次以摘录形式发给模型的工具输出（同一次工具调用只报一次）
+    tool_output_excerpts: tuple[ToolOutputExcerpt, ...] = ()
     reflection_input_json: str | None = None
     reflection_raw_output: str | None = None
     maintenance_triggered: bool | None = None

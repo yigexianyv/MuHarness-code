@@ -46,6 +46,54 @@ class ToolResultView(BaseModel):
 # 关键调用（按源码出现顺序，实际执行取决于分支）：`json.dumps` →
 # `hashlib.sha256(canonical.encode('utf-8')).hexdigest` → `hashlib.sha256` →
 # `canonical.encode`。
+class ToolOutputExcerpt(BaseModel):
+    """模型实际收到的是工具输出摘录（掐头去尾）时，记录它收到了什么。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tool_call_id: str
+    tool_name: str | None = None
+    output_chars: int = Field(ge=0)
+    model_output: str
+
+
+def tool_output_excerpts(
+    raw_messages: Sequence[Message],
+    projected_messages: Sequence[Message],
+) -> tuple[ToolOutputExcerpt, ...]:
+    """对比原始与投影后的消息，找出模型只收到摘录的工具结果。"""
+    excerpts: list[ToolOutputExcerpt] = []
+    for raw, projected in zip(raw_messages, projected_messages, strict=True):
+        if (
+            raw.role is not MessageRole.TOOL
+            or raw.tool_call_id is None
+            or raw.content == projected.content
+        ):
+            continue
+        raw_output = _envelope_output(raw.content)
+        model_output = _envelope_output(projected.content)
+        if raw_output is None or model_output is None:
+            continue
+        excerpts.append(
+            ToolOutputExcerpt(
+                tool_call_id=raw.tool_call_id,
+                tool_name=raw.name,
+                output_chars=len(raw_output),
+                model_output=model_output,
+            )
+        )
+    return tuple(excerpts)
+
+
+def _envelope_output(content: str | None) -> str | None:
+    try:
+        envelope = json.loads(content or "")
+    except (ValueError, TypeError):
+        return None
+    output = envelope.get("output") if isinstance(envelope, dict) else None
+    return output if isinstance(output, str) else None
+
+
 def raw_message_sha256(message: Message) -> str:
     """Hash the canonical raw message, not provider/prompt transformations."""
     canonical = json.dumps(
@@ -228,4 +276,10 @@ class ToolResultViewState:
         return json.dumps(envelope, ensure_ascii=False, separators=(",", ":"))
 
 
-__all__ = ["ToolResultView", "ToolResultViewState", "raw_message_sha256"]
+__all__ = [
+    "ToolOutputExcerpt",
+    "ToolResultView",
+    "ToolResultViewState",
+    "raw_message_sha256",
+    "tool_output_excerpts",
+]

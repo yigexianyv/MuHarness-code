@@ -209,24 +209,52 @@ export function buildContextSteps(events: AgentEvent[]): ContextStepVM[] {
     })
 }
 
-/** 按"运行:步骤"汇总被截短的工具输出；同一次工具调用只算一次。 */
+/**
+ * 按"运行:步骤"汇总被截短的工具输出；同一次工具调用只算一次，挂在工具执行的那一步。
+ * 两处会截短：工具执行器（tool_completed 的 output_truncated）和上下文管理器的摘录
+ * （model_started 的 tool_output_excerpts）。有摘录时，模型实际收到的是摘录。
+ */
 export function collectTruncatedTools(events: AgentEvent[]): Map<string, TruncatedToolVM[]> {
-  const seen = new Set<string>()
-  const byStep = new Map<string, TruncatedToolVM[]>()
-  for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
+  const byCall = new Map<string, TruncatedToolVM & { stepKey: string }>()
+  const toolStep = new Map<string, { stepKey: string; evidenceId: string | null }>()
+  const sorted = [...events].sort((a, b) => a.sequence - b.sequence)
+  for (const event of sorted) {
     const result = event.tool_result
-    if (event.type !== 'tool_completed' || event.step == null || !result?.output_truncated) continue
+    if (event.type !== 'tool_completed' || event.step == null || !result) continue
     const key = `${event.run_id}:${result.tool_call_id}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    const stepKey = `${event.run_id}:${event.step}`
-    const list = byStep.get(stepKey) ?? []
-    list.push({
+    toolStep.set(key, { stepKey: `${event.run_id}:${event.step}`, evidenceId: result.evidence_id ?? null })
+    if (!result.output_truncated || byCall.has(key)) continue
+    byCall.set(key, {
+      stepKey: `${event.run_id}:${event.step}`,
       toolCallId: result.tool_call_id,
       toolName: result.tool_name,
       modelOutput: result.output ?? '',
       evidenceId: result.evidence_id ?? null,
     })
+  }
+  for (const event of sorted) {
+    if (event.type !== 'model_started' || event.step == null) continue
+    for (const excerpt of event.tool_output_excerpts ?? []) {
+      const key = `${event.run_id}:${excerpt.tool_call_id}`
+      const existing = byCall.get(key)
+      if (existing) {
+        existing.modelOutput = excerpt.model_output
+        continue
+      }
+      const completed = toolStep.get(key)
+      byCall.set(key, {
+        stepKey: completed?.stepKey ?? `${event.run_id}:${event.step}`,
+        toolCallId: excerpt.tool_call_id,
+        toolName: excerpt.tool_name ?? '工具',
+        modelOutput: excerpt.model_output,
+        evidenceId: completed?.evidenceId ?? null,
+      })
+    }
+  }
+  const byStep = new Map<string, TruncatedToolVM[]>()
+  for (const { stepKey, ...tool } of byCall.values()) {
+    const list = byStep.get(stepKey) ?? []
+    list.push(tool)
     byStep.set(stepKey, list)
   }
   return byStep

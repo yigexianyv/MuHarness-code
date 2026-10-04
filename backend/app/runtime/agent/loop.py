@@ -25,7 +25,11 @@ from app.runtime.context import (
     ContextManager,
     ConversationSummaryState,
 )
-from app.runtime.context.tool_views import ToolResultView, ToolResultViewState
+from app.runtime.context.tool_views import (
+    ToolResultView,
+    ToolResultViewState,
+    tool_output_excerpts,
+)
 from app.tools.catalog import (
     ensure_tool_search_registered,
 )
@@ -317,6 +321,7 @@ class AgentLoop:
             ),
         )
         activated_tools: set[str] = set()
+        reported_excerpt_ids: set[str] = set()
         ensure_tool_search_registered(self._tool_registry)
         plan_task_created = False
         plan_task_id: str | None = None
@@ -497,9 +502,18 @@ class AgentLoop:
                 budget_forces_final and not closing_can_deliver
             )
             raw_source_messages = tuple(messages)
+            view_messages = tool_view_state.project(raw_source_messages)
+            # 只报本次运行执行的工具；继承的历史结果在它们自己的运行里已经报过
+            run_tool_call_ids = {record.tool_call.id for record in tool_calls}
+            new_excerpts = tuple(
+                excerpt
+                for excerpt in tool_output_excerpts(raw_source_messages, view_messages)
+                if excerpt.tool_call_id in run_tool_call_ids
+                and excerpt.tool_call_id not in reported_excerpt_ids
+            )
+            reported_excerpt_ids.update(item.tool_call_id for item in new_excerpts)
             projected_messages = tuple(
-                without_legacy_fixed_date(message)
-                for message in tool_view_state.project(raw_source_messages)
+                without_legacy_fixed_date(message) for message in view_messages
             )
             source_messages = (
                 (request_system_message, *projected_messages)
@@ -854,6 +868,7 @@ class AgentLoop:
                 prepared_usage_ratio=context_decision.prepared_usage_ratio,
                 compaction_stage=context_decision.compaction_stage.value,
                 compacted_tool_results=context_decision.compacted_tool_results,
+                tool_output_excerpts=new_excerpts,
                 removed_tool_rounds=context_decision.removed_tool_rounds,
                 reached_target=context_decision.reached_target,
                 needs_next_compaction_stage=(

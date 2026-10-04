@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -27,6 +28,8 @@ from tests.offline.agent.test_agent_runtime import (
 )
 
 _LONG_OUTPUT = "HEAD_MARKER\n" + "x" * 133_000 + "\nEND_MARKER"
+# 不超过执行器上限，但超过上下文给模型的摘录上限
+_MEDIUM_OUTPUT = "HEAD_MARKER\n" + "y" * 15_000 + "\nEND_MARKER"
 
 
 class DumpTool(BaseTool):
@@ -35,12 +38,17 @@ class DumpTool(BaseTool):
         description="return a long or short text",
         parameters={
             "type": "object",
-            "properties": {"long": {"type": "boolean"}},
+            "properties": {
+                "long": {"type": "boolean"},
+                "medium": {"type": "boolean"},
+            },
             "required": ["long"],
         },
     )
 
     async def execute(self, arguments: dict[str, object]) -> str:
+        if arguments.get("medium"):
+            return _MEDIUM_OUTPUT
         return _LONG_OUTPUT if arguments["long"] else "short output"
 
 
@@ -84,13 +92,17 @@ async def env(tmp_path):
         )
     )
 
-    async def run_tool(conversation_id: str, run_id: str, *, long: bool):
-        registry, _ = fake_registry(
+    async def run_tool(
+        conversation_id: str, run_id: str, *, long: bool, medium: bool = False
+    ):
+        registry, adapter = fake_registry(
             [
                 model_response(
                     tool_calls=(
                         ToolCall(
-                            id=f"call-{run_id}", name="dump", arguments={"long": long}
+                            id=f"call-{run_id}",
+                            name="dump",
+                            arguments={"long": long, "medium": medium},
                         ),
                     )
                 ),
@@ -121,6 +133,7 @@ async def env(tmp_path):
             created_at=now,
             updated_at=now,
         )
+        handler.model_requests = adapter.requests
         return handler
 
     return SimpleNamespace(
@@ -177,6 +190,64 @@ async def test_long_output_is_truncated_for_model_but_full_text_is_readable(
     assert full.endswith("END_MARKER")
 
 
+def _excerpts(handler) -> list:
+    return [
+        (event.step, excerpt)
+        for event in handler.events
+        if event.type is AgentEventType.MODEL_STARTED
+        for excerpt in event.tool_output_excerpts
+    ]
+
+
+@pytest.mark.asyncio
+async def test_long_output_reports_the_excerpt_the_model_actually_received(
+    env,
+) -> None:
+    conversation = await env.conversations.create(title="长输出摘录")
+    handler = await env.run_tool(conversation.id, "run-long", long=True)
+
+    [(step, excerpt)] = _excerpts(handler)
+    assert step == 2
+    assert excerpt.tool_call_id == "call-run-long"
+    assert excerpt.tool_name == "dump"
+    # 执行器截短后的输出，再被上下文摘录成开头 + 结尾
+    assert excerpt.output_chars < len(_LONG_OUTPUT)
+    assert len(excerpt.model_output) < excerpt.output_chars
+    assert excerpt.model_output.startswith("HEAD_MARKER")
+    tool_message = next(
+        message
+        for message in handler.model_requests[1].messages
+        if message.role is MessageRole.TOOL
+    )
+    assert json.loads(tool_message.content or "")["output"] == excerpt.model_output
+
+
+@pytest.mark.asyncio
+async def test_medium_output_is_excerpted_for_model_without_executor_truncation(
+    env,
+) -> None:
+    conversation = await env.conversations.create(title="中等输出")
+    handler = await env.run_tool(
+        conversation.id, "run-medium", long=False, medium=True
+    )
+    result = next(
+        event.tool_result
+        for event in handler.events
+        if event.type is AgentEventType.TOOL_COMPLETED
+    )
+    assert not result.output_truncated
+
+    [(_, excerpt)] = _excerpts(handler)
+    assert excerpt.output_chars == len(_MEDIUM_OUTPUT)
+    assert excerpt.model_output.startswith("HEAD_MARKER")
+    assert excerpt.model_output.endswith("END_MARKER")
+    assert "omitted from the middle" in excerpt.model_output
+    assert len(excerpt.model_output) < len(_MEDIUM_OUTPUT)
+
+    full = await _read_all(env.ctx, "run-medium", "call-run-medium")
+    assert full == _MEDIUM_OUTPUT
+
+
 @pytest.mark.asyncio
 async def test_short_output_is_not_marked_truncated(env) -> None:
     conversation = await env.conversations.create(title="短输出")
@@ -187,6 +258,7 @@ async def test_short_output_is_not_marked_truncated(env) -> None:
         if event.type is AgentEventType.TOOL_COMPLETED
     )
     assert not result.output_truncated
+    assert _excerpts(handler) == []
     page = await run_context_evidence(
         {"run_id": "run-short", "tool_call_id": "call-run-short"}, env.ctx
     )
