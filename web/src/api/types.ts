@@ -247,6 +247,8 @@ export interface AgentEvent {
   prepared_usage_ratio?: number | null
   compaction_stage?: string | null
   compacted_tool_results?: number | null
+  /** 本步首次以摘录（保留开头和结尾）发给模型的工具输出 */
+  tool_output_excerpts?: ToolOutputExcerpt[] | null
   removed_tool_rounds?: number | null
   reached_target?: boolean | null
   summary_updated?: boolean | null
@@ -345,6 +347,16 @@ export interface ConversationFork {
   source_step: number
   rewind_key: string
   undone: boolean
+}
+
+/** 模型实际收到的工具输出摘录。 */
+export interface ToolOutputExcerpt {
+  tool_call_id: string
+  tool_name?: string | null
+  /** 摘录前的输出字符数 */
+  output_chars: number
+  /** 模型实际收到的输出 */
+  model_output: string
 }
 
 /** 某次工具调用完整原文的一页（来自证据库）。 */
