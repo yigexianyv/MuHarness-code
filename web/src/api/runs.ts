@@ -7,8 +7,12 @@ import type {
   AgentRunTrace,
   AgentResult,
   Run,
+  RewindPreview,
+  RewindResult,
+  RewindStepInfo,
   RunContextMessagesPage,
   RunUsageSummary,
+  ToolEvidencePage,
 } from './types'
 
 export interface RunListQuery {
@@ -70,5 +74,64 @@ export async function getRunContextMessages(
     run_id: runId,
     offset,
     limit,
+  })
+}
+
+export async function listRunSteps(runId: string): Promise<RewindStepInfo[]> {
+  const response = await rpcClient.call<{ steps: RewindStepInfo[] }>(
+    RpcMethods.runStepsList,
+    { run_id: runId },
+  )
+  return response.steps
+}
+
+/** 只读：回到第 step 步之前会恢复、删除哪些文件，哪些操作不会回退。 */
+export async function previewRewind(runId: string, step: number): Promise<RewindPreview> {
+  const response = await rpcClient.call<{ preview: RewindPreview }>(
+    RpcMethods.runRewindPreview,
+    { run_id: runId, step },
+  )
+  return response.preview
+}
+
+/** rewindKey 在一次确认中保持不变，重复提交只会生效一次。 */
+export async function applyRewind(input: {
+  runId: string
+  step: number
+  previewId: string
+  correction: string
+  rewindKey: string
+}): Promise<RewindResult> {
+  const response = await rpcClient.call<{ rewind: RewindResult }>(
+    RpcMethods.runRewindApply,
+    {
+      run_id: input.runId,
+      step: input.step,
+      preview_id: input.previewId,
+      correction: input.correction,
+      rewind_key: input.rewindKey,
+    },
+  )
+  return response.rewind
+}
+
+export async function undoRewind(rewindKey: string): Promise<RewindResult> {
+  const response = await rpcClient.call<{ rewind: RewindResult }>(
+    RpcMethods.runRewindUndo,
+    { rewind_key: rewindKey },
+  )
+  return response.rewind
+}
+
+/** 分页读取工具调用的完整原文（模型收到的可能是截短版本）。 */
+export async function getRunToolEvidence(
+  runId: string,
+  toolCallId: string,
+  offset: number,
+): Promise<ToolEvidencePage> {
+  return rpcClient.call(RpcMethods.runContextEvidence, {
+    run_id: runId,
+    tool_call_id: toolCallId,
+    offset,
   })
 }

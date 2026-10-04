@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -288,6 +288,30 @@ class SQLiteEvidenceStore:
     # `ValueError('limit must be between 1 and 20')`。
     #   当 `not normalized_query` 时，抛出
     # `ValueError('query must be a non-empty string')`。
+    async def find_for_tool_call(
+        self,
+        tool_call_id: str,
+        *,
+        conversation_ids: Sequence[str],
+    ) -> EvidenceDocument | None:
+        """按工具调用找完整原文；只在给定的会话范围内查找。"""
+        if not conversation_ids:
+            return None
+        placeholders = ", ".join("?" for _ in conversation_ids)
+        async with self._connect() as database:
+            cursor = await database.execute(
+                f"""
+                SELECT * FROM evidence
+                WHERE tool_call_id = ? AND conversation_id IN ({placeholders})
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (tool_call_id, *conversation_ids),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return EvidenceDocument(record=_record_from_row(row), content=row["content"])
+
     async def search(
         self,
         *,

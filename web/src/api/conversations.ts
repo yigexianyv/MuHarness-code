@@ -6,6 +6,7 @@ import type {
   AgentMode,
   Conversation,
   ConversationConstraints,
+  ConversationFork,
   Message,
   SendMessageResponse,
 } from './types'
@@ -20,7 +21,7 @@ export async function listConversations(limit = 50): Promise<Conversation[]> {
 
 export async function getConversation(
   conversationId: string,
-): Promise<{ conversation: Conversation; messages: Message[] }> {
+): Promise<{ conversation: Conversation; messages: Message[]; fork?: ConversationFork | null }> {
   return rpcClient.call(RpcMethods.conversationGet, {
     conversation_id: conversationId,
   })

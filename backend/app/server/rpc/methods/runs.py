@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.runtime.rewind.service import RewindConflict, RewindError, RewindService
 from app.runtime.run import RunStatus, history_sha256
 
 from ..dispatcher import RpcContext, RpcDispatcher
@@ -264,6 +265,146 @@ async def run_context_messages(
     }
 
 
+_EVIDENCE_PAGE_MAX_CHARS = 12_000
+_FORK_CHAIN_LIMIT = 20
+
+
+async def run_context_evidence(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """分页读取某次工具调用的完整原文（模型收到的可能是截短版本）。
+
+    只在该运行所属会话、以及它经"重做此步"继承的来源会话里查找，
+    不能凭工具调用 ID 读到无关会话的证据。
+    """
+    run_id = _require_str(params, "run_id")
+    tool_call_id = _require_str(params, "tool_call_id")
+    offset = params.get("offset", 0)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise JsonRpcError(
+            RpcErrorCode.INVALID_PARAMS,
+            "offset must be a non-negative integer",
+        )
+    limit = min(
+        _positive_int(params, "limit", default=_EVIDENCE_PAGE_MAX_CHARS),
+        _EVIDENCE_PAGE_MAX_CHARS,
+    )
+    application = ctx.application
+    run = await application.run_manager.get_run(run_id)
+    if run is None:
+        raise JsonRpcError(RESOURCE_NOT_FOUND, "run not found")
+    if run.conversation_id is None:
+        raise JsonRpcError(RESOURCE_NOT_FOUND, "完整原文不可用：该运行没有关联会话")
+    conversation_ids = [run.conversation_id]
+    rewind_service = getattr(application, "rewind_service", None)
+    current = run.conversation_id
+    while rewind_service is not None and len(conversation_ids) < _FORK_CHAIN_LIMIT:
+        fork = await rewind_service.fork_for(current)
+        if fork is None or fork.source_conversation_id in conversation_ids:
+            break
+        current = fork.source_conversation_id
+        conversation_ids.append(current)
+    document = await application.evidence_store.find_for_tool_call(
+        tool_call_id,
+        conversation_ids=conversation_ids,
+    )
+    if document is None:
+        raise JsonRpcError(
+            RESOURCE_NOT_FOUND,
+            "完整原文不可用：没有找到这次工具调用的证据记录",
+        )
+    content = document.content
+    end = min(len(content), offset + limit)
+    return {
+        "run_id": run_id,
+        "tool_call_id": tool_call_id,
+        "tool_name": document.record.tool_name,
+        "evidence_id": document.record.id,
+        "total_chars": len(content),
+        "offset": offset,
+        "content": content[offset:end],
+        "next_offset": end if end < len(content) else None,
+    }
+
+
+def _rewind_service(ctx: RpcContext) -> RewindService:
+    service = ctx.application.rewind_service
+    if service is None:
+        raise JsonRpcError(INVALID_STATE, "rewind service is not ready")
+    return service
+
+
+def _require_step(params: dict[str, Any]) -> int:
+    step = params.get("step")
+    if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+        raise JsonRpcError(RpcErrorCode.INVALID_PARAMS, "step must be >= 1")
+    return step
+
+
+async def run_steps_list(params: dict[str, Any], ctx: RpcContext) -> dict[str, Any]:
+    """每一步的检查点，以及能否从这一步重做（不能时给出原因）。"""
+    run_id = _require_str(params, "run_id")
+    steps = await _rewind_service(ctx).list_steps(run_id)
+    return {"run_id": run_id, "steps": steps}
+
+
+async def run_rewind_preview(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """只读：回到第 N 步之前会恢复、删除哪些文件，哪些操作不会回退。"""
+    run_id = _require_str(params, "run_id")
+    step = _require_step(params)
+    try:
+        preview = await _rewind_service(ctx).preview(run_id, step)
+    except RewindError as exc:
+        raise JsonRpcError(INVALID_STATE, str(exc)) from exc
+    return {"preview": preview}
+
+
+async def run_rewind_apply(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """恢复文件并新建分支会话；同一个 rewind_key 只生效一次。"""
+    run_id = _require_str(params, "run_id")
+    step = _require_step(params)
+    preview_id = _require_str(params, "preview_id")
+    rewind_key = _require_str(params, "rewind_key")
+    correction = params.get("correction")
+    if not isinstance(correction, str):
+        raise JsonRpcError(RpcErrorCode.INVALID_PARAMS, "correction must be a string")
+    try:
+        result = await _rewind_service(ctx).apply(
+            run_id=run_id,
+            step=step,
+            preview_id=preview_id,
+            correction=correction,
+            rewind_key=rewind_key,
+        )
+    except RewindConflict as exc:
+        raise JsonRpcError(
+            INVALID_STATE, str(exc), {"reason": "preview_outdated"}
+        ) from exc
+    except RewindError as exc:
+        raise JsonRpcError(INVALID_STATE, str(exc)) from exc
+    return {"rewind": result}
+
+
+async def run_rewind_undo(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """把工作区文件恢复到回退之前；分支会话保留。"""
+    rewind_key = _require_str(params, "rewind_key")
+    try:
+        result = await _rewind_service(ctx).undo(rewind_key)
+    except RewindError as exc:
+        raise JsonRpcError(INVALID_STATE, str(exc)) from exc
+    return {"rewind": result}
+
+
 def _require_str(params: dict[str, Any], key: str) -> str:
     value = params.get(key)
     if not isinstance(value, str) or not value:
@@ -305,3 +446,8 @@ def register(dispatcher: RpcDispatcher) -> None:
     dispatcher.register("run.interrupt", run_interrupt)
     dispatcher.register("run.recover", run_recover)
     dispatcher.register("run.context.messages", run_context_messages)
+    dispatcher.register("run.context.evidence", run_context_evidence)
+    dispatcher.register("run.steps.list", run_steps_list)
+    dispatcher.register("run.rewind.preview", run_rewind_preview)
+    dispatcher.register("run.rewind.apply", run_rewind_apply)
+    dispatcher.register("run.rewind.undo", run_rewind_undo)

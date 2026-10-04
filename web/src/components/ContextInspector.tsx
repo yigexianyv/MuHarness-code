@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 
 import { getConversationConstraints, setConversationConstraints } from '../api/conversations'
-import { getRunContextMessages } from '../api/runs'
+import { getRunContextMessages, getRunToolEvidence } from '../api/runs'
 import type { AgentEvent, Message } from '../api/types'
 import {
   buildContextSteps,
@@ -14,10 +14,16 @@ import {
   SUMMARY_FIELDS,
   summaryEntries,
   type ContextStepVM,
+  type TruncatedToolVM,
 } from '../agent/runAnalysis'
 import { formatCacheHitRate, formatTokens } from '../agent/turnPresentation'
 import { toast } from '../stores/toasts'
 import { EmptyState } from './ui'
+
+/** 打开某次工具调用的输出：模型实际收到的（截短版），或证据库里的完整原文。 */
+type OpenToolOutput =
+  | { kind: 'model'; tool: TruncatedToolVM }
+  | { kind: 'full'; toolCallId: string; toolName: string }
 
 interface MessageRange {
   from: number
@@ -56,11 +62,13 @@ function ContextTimeline({
   selected,
   onSelect,
   onOpenRange,
+  onOpenTool,
 }: {
   steps: ContextStepVM[]
   selected: number
   onSelect: (step: number) => void
   onOpenRange: (range: MessageRange) => void
+  onOpenTool?: (target: OpenToolOutput) => void
 }): React.JSX.Element {
   return (
     <section className="context-section">
@@ -82,7 +90,7 @@ function ContextTimeline({
                   ? <span className="context-timeline__alert">⚠ {step.constraintsPossiblyDropped.length} 条约束可能丢失</span>
                   : null}
               </button>
-              {covered || step.compactedToolResults > 0 || step.removedToolRounds > 0 || step.summaryError ? (
+              {covered || step.truncatedTools.length > 0 || step.compactedToolResults > 0 || step.removedToolRounds > 0 || step.summaryError ? (
                 <ul className="context-timeline__details">
                   {covered ? (
                     <li>
@@ -99,9 +107,29 @@ function ContextTimeline({
                       </button>
                     </li>
                   ) : null}
+                  {step.truncatedTools.map((tool) => (
+                    <li key={tool.toolCallId}>
+                      · {tool.toolName} 输出过长，模型收到截短版本{' '}
+                      {onOpenTool ? (
+                        <>
+                          <button type="button" className="context-link" onClick={() => onOpenTool({ kind: 'model', tool })}>
+                            查看模型收到的内容
+                          </button>
+                          {' · '}
+                          <button
+                            type="button"
+                            className="context-link"
+                            onClick={() => onOpenTool({ kind: 'full', toolCallId: tool.toolCallId, toolName: tool.toolName })}
+                          >
+                            查看完整工具原文
+                          </button>
+                        </>
+                      ) : null}
+                    </li>
+                  ))}
                   {step.compactedToolResults > 0 ? (
                     <li>
-                      · {step.compactedToolResults} 个工具输出被截短
+                      · {step.compactedToolResults} 个旧工具结果在请求中被压缩
                       {step.sourceMessageCount !== null ? (
                         <>
                           {' '}
@@ -111,7 +139,7 @@ function ContextTimeline({
                             onClick={() => onOpenRange({
                               from: 0,
                               to: step.sourceMessageCount!,
-                              title: `步骤 ${step.step}：请求前的全部原始消息（工具输出为完整原文）`,
+                              title: `步骤 ${step.step}：请求前的全部消息`,
                             })}
                           >
                             查看原文
@@ -213,15 +241,69 @@ function messagePreview(message: Message): string {
 }
 
 const RAW_PAGE_SIZE = 20
+const EVIDENCE_PAGE_CHARS = 12_000
+
+export function ToolOutputViewer({
+  runId,
+  target,
+  onClose,
+}: {
+  runId: string
+  target: OpenToolOutput
+  onClose: () => void
+}): React.JSX.Element {
+  const toolCallId = target.kind === 'model' ? target.tool.toolCallId : target.toolCallId
+  const toolName = target.kind === 'model' ? target.tool.toolName : target.toolName
+  const [offset, setOffset] = useState(0)
+  useEffect(() => setOffset(0), [toolCallId, target.kind])
+  const query = useQuery({
+    queryKey: ['run-tool-evidence', runId, toolCallId, offset],
+    queryFn: () => getRunToolEvidence(runId, toolCallId, offset),
+    enabled: target.kind === 'full',
+    retry: false,
+  })
+  const page = query.data
+  return (
+    <section className="context-section context-raw" aria-label="工具输出">
+      <div className="context-section__heading">
+        <h3>{target.kind === 'model' ? `${toolName}：模型收到的内容（已截短）` : `${toolName}：完整工具原文`}</h3>
+        <button type="button" className="context-link" onClick={onClose}>收起</button>
+      </div>
+      {target.kind === 'model' ? (
+        <>
+          <p className="context-note">模型实际看到的是下面这段截短后的输出（{target.tool.modelOutput.length.toLocaleString()} 字符）。</p>
+          <pre className="context-raw__pre">{target.tool.modelOutput || '（空）'}</pre>
+        </>
+      ) : query.isPending ? <p className="context-muted">正在读取完整原文…</p>
+        : query.isError || !page ? (
+          <p className="context-warning">{query.error instanceof Error ? query.error.message : '完整原文不可用'}</p>
+        ) : (
+          <>
+            <p className="context-note">
+              证据 {page.evidence_id.slice(0, 8)} · 共 {page.total_chars.toLocaleString()} 字符。这是工具实际返回的全文，模型收到的可能只是其中一部分。
+            </p>
+            <pre className="context-raw__pre">{page.content}</pre>
+            <div className="context-raw__pager">
+              <button type="button" className="btn btn-sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - EVIDENCE_PAGE_CHARS))}>上一页</button>
+              <span className="mono">{(page.offset + 1).toLocaleString()}–{(page.offset + page.content.length).toLocaleString()} / {page.total_chars.toLocaleString()}</span>
+              <button type="button" className="btn btn-sm" disabled={page.next_offset === null} onClick={() => page.next_offset !== null && setOffset(page.next_offset)}>下一页</button>
+            </div>
+          </>
+        )}
+    </section>
+  )
+}
 
 function RawMessagesViewer({
   runId,
   range,
   onClose,
+  onOpenTool,
 }: {
   runId: string
   range: MessageRange
   onClose: () => void
+  onOpenTool: (target: OpenToolOutput) => void
 }): React.JSX.Element {
   const [offset, setOffset] = useState(range.from)
   useEffect(() => setOffset(range.from), [range.from, range.to])
@@ -238,6 +320,7 @@ function RawMessagesViewer({
         <h3>{range.title}</h3>
         <button type="button" className="context-link" onClick={onClose}>收起</button>
       </div>
+      <p className="context-note">这里是模型收到的消息；过长的工具输出在这里是截短版，完整内容点"查看完整工具原文"。</p>
       {query.isPending ? <p className="context-muted">正在读取原文…</p>
         : query.isError ? <p className="context-warning">{query.error instanceof Error ? query.error.message : String(query.error)}</p>
           : items.length === 0 ? <p className="context-muted">这一段没有记录到原文。</p>
@@ -249,6 +332,22 @@ function RawMessagesViewer({
                       #{item.index + 1} · {item.message.role}
                       {item.message.name ? ` · ${item.message.name}` : ''}
                       {item.inherited ? ' · 来自之前的会话' : ''}
+                      {item.message.role === 'tool' && item.message.tool_call_id ? (
+                        <>
+                          {' · '}
+                          <button
+                            type="button"
+                            className="context-link"
+                            onClick={() => onOpenTool({
+                              kind: 'full',
+                              toolCallId: item.message.tool_call_id!,
+                              toolName: item.message.name ?? '工具',
+                            })}
+                          >
+                            查看完整工具原文
+                          </button>
+                        </>
+                      ) : null}
                     </div>
                     <pre>{messagePreview(item.message)}</pre>
                   </li>
@@ -429,6 +528,7 @@ export default function ContextInspector({
   const steps = useMemo(() => buildContextSteps(events), [events])
   const [selectedStep, setSelectedStep] = useState<number | null>(null)
   const [openRange, setOpenRange] = useState<MessageRange | null>(null)
+  const [openTool, setOpenTool] = useState<OpenToolOutput | null>(null)
   const selected = steps.find((step) => step.step === selectedStep) ?? steps.at(-1)
 
   useEffect(() => {
@@ -472,9 +572,13 @@ export default function ContextInspector({
         selected={selected.step}
         onSelect={setSelectedStep}
         onOpenRange={setOpenRange}
+        onOpenTool={runId ? setOpenTool : undefined}
       />
       {openRange && runId ? (
-        <RawMessagesViewer runId={runId} range={openRange} onClose={() => setOpenRange(null)} />
+        <RawMessagesViewer runId={runId} range={openRange} onClose={() => setOpenRange(null)} onOpenTool={setOpenTool} />
+      ) : null}
+      {openTool && runId ? (
+        <ToolOutputViewer runId={runId} target={openTool} onClose={() => setOpenTool(null)} />
       ) : null}
       <SummaryPanel key={selected.step} steps={steps} step={selected} canPin={Boolean(conversationId)} />
       {conversationId ? (

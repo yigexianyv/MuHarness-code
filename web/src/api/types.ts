@@ -217,6 +217,10 @@ export interface AgentEvent {
     duration_ms: number
     approval_wait_ms?: number | null
     execution_duration_ms?: number | null
+    /** 完整输出存在证据库里的编号 */
+    evidence_id?: string | null
+    /** 输出过长，模型收到的是截短版本 */
+    output_truncated?: boolean | null
   } | null
   usage: ModelUsage | null
   stop_reason: string | null
@@ -287,6 +291,72 @@ export interface ConversationConstraints {
   text: string
   revision: number
   updated_at: string | null
+}
+
+export interface RewindStepInfo {
+  step: number
+  message_count: number
+  has_snapshot: boolean
+  snapshot_error: string | null
+  rewindable: boolean
+  reason: string | null
+}
+
+export interface RewindFileChange {
+  path: string
+  /** restore：恢复为该步之前的内容；delete：该步之后新建，将被删除 */
+  action: 'restore' | 'delete'
+  changed_after_run: boolean
+}
+
+export interface IrreversibleOperation {
+  step: number | null
+  tool: string
+  summary: string
+  note: string
+}
+
+export interface RewindPreview {
+  preview_id: string
+  run_id: string
+  step: number
+  files: RewindFileChange[]
+  skipped_files: string[]
+  irreversible: IrreversibleOperation[]
+  blocked_reason: string | null
+}
+
+export interface RewindResult {
+  rewind_key: string
+  run_id: string
+  step: number
+  conversation_id: string
+  draft: string
+  files_restored: number
+  files_deleted: number
+  status: string
+}
+
+/** 由"重做此步"创建的分支会话的来源。 */
+export interface ConversationFork {
+  conversation_id: string
+  source_conversation_id: string
+  source_run_id: string
+  source_step: number
+  rewind_key: string
+  undone: boolean
+}
+
+/** 某次工具调用完整原文的一页（来自证据库）。 */
+export interface ToolEvidencePage {
+  run_id: string
+  tool_call_id: string
+  tool_name: string
+  evidence_id: string
+  total_chars: number
+  offset: number
+  content: string
+  next_offset: number | null
 }
 
 export interface RunContextMessage {

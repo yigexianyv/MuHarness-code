@@ -161,6 +161,11 @@ export default function App(): React.JSX.Element {
               runId={selectedRunId}
               onBack={() => setSelectedRunId(null)}
               onOpenConversation={openConversation}
+              onRewound={(conversationId, draft) => {
+                void queryClient.invalidateQueries({ queryKey: ['conversations'] })
+                setPreparedWork({ conversationId, content: draft, mode: 'normal' })
+                openConversation(conversationId)
+              }}
             />
           ) : (
             <LedgerPage openRun={openRun} tab={ledgerTab} onTabChange={setLedgerTab} />

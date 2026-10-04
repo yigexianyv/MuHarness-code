@@ -30,6 +30,7 @@ from app.runtime.checkpoint import (
 )
 from app.runtime.context import ContextManager, ConversationSummaryState
 from app.runtime.context.tool_views import ToolResultView
+from app.runtime.rewind import RunStepRecorder
 from app.tools.approval import ApprovalGate
 from app.tools.executor import ToolExecutor
 from app.tools.hooks import ToolHook
@@ -66,6 +67,7 @@ from .result import (
 )
 
 if TYPE_CHECKING:
+    from app.runtime.rewind import SQLiteRunStepStore, WorkspaceSnapshotStore
     from app.runtime.run.messages_store import (
         RunMessageRecorder,
         SQLiteRunMessageStore,
@@ -155,6 +157,8 @@ class AgentRuntime:
         run_budget_config: RunBudgetConfig | None = None,
         run_message_store: SQLiteRunMessageStore | None = None,
         constraints_provider: ConstraintsProvider | None = None,
+        run_step_store: SQLiteRunStepStore | None = None,
+        workspace_snapshots: WorkspaceSnapshotStore | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -179,6 +183,8 @@ class AgentRuntime:
         self._context_manager = context_manager or ContextManager()
         self._checkpoint_store = checkpoint_store
         self._run_message_store = run_message_store
+        self._run_step_store = run_step_store
+        self._workspace_snapshots = workspace_snapshots
         self._post_run = PostRunMemoryCoordinator(
             manager=memory_manager,
             reflector=memory_reflector,
@@ -304,6 +310,13 @@ class AgentRuntime:
                         conversation_id=conversation_id,
                         history=history,
                     )
+            step_recorder: RunStepRecorder | None = None
+            if self._run_step_store is not None:
+                step_recorder = RunStepRecorder(
+                    self._run_step_store,
+                    self._workspace_snapshots,
+                    run_id,
+                )
             try:
                 result = await self._loop.run(
                     run_id,
@@ -317,6 +330,7 @@ class AgentRuntime:
                     mode=mode,
                     tool_context_metadata=tool_context_metadata,
                     message_recorder=recorder,
+                    step_recorder=step_recorder,
                 )
             except BaseException as exc:
                 if self._checkpoint_store is not None:
@@ -329,6 +343,8 @@ class AgentRuntime:
 
             if recorder is not None:
                 await recorder.sync(result.messages)
+            if step_recorder is not None:
+                await step_recorder.finish()
             if self._checkpoint_store is not None:
                 if result.ok:
                     await self._checkpoint_store.complete(

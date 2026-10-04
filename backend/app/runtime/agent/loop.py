@@ -66,6 +66,7 @@ from .tool_hooks import AgentEventHook
 from .tool_round_executor import ToolRoundExecutor
 
 if TYPE_CHECKING:
+    from app.runtime.rewind.steps import RunStepRecorder
     from app.runtime.run.messages_store import RunMessageRecorder
 
 # 读取会话"必须记住的事项"：返回（正文，版本号）。
@@ -259,6 +260,7 @@ class AgentLoop:
         tool_context_metadata: Mapping[str, Any] | None = None,
         tool_result_views: Sequence[ToolResultView] = (),
         message_recorder: RunMessageRecorder | None = None,
+        step_recorder: RunStepRecorder | None = None,
     ) -> AgentResult:
         """驱动模型与工具；原始历史保持完整，模型视图只在压缩边界重建。"""
         tool_event_hook = AgentEventHook(emitter)
@@ -896,6 +898,28 @@ class AgentLoop:
                     ),
                     AgentStopReason.CONTEXT_ERROR,
                     step=step,
+                )
+
+            if step_recorder is not None:
+                # 回退检查点：上一步已完成、这一步还没请求模型
+                await step_recorder.record(
+                    step=step,
+                    message_count=len(raw_source_messages),
+                    summary_state=current_summary_state,
+                    tool_result_views=tool_view_state.snapshot(raw_source_messages),
+                    constraints_revision=(
+                        pinned_constraints[1]
+                        if pinned_constraints is not None
+                        else None
+                    ),
+                    task_context_text=next(
+                        (
+                            message.content
+                            for message in context_messages
+                            if message.name == "muharness_active_task"
+                        ),
+                        None,
+                    ),
                 )
 
             request_prefix_state = RequestPrefixState(

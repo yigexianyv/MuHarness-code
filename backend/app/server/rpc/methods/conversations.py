@@ -55,7 +55,13 @@ async def conversation_get(
     if conversation is None:
         raise JsonRpcError(RESOURCE_NOT_FOUND, "conversation not found")
     messages = await application.conversation_store.load_messages(conversation_id)
-    return {"conversation": conversation, "messages": messages}
+    rewind_service = getattr(application, "rewind_service", None)
+    fork = (
+        await rewind_service.fork_for(conversation_id)
+        if rewind_service is not None
+        else None
+    )
+    return {"conversation": conversation, "messages": messages, "fork": fork}
 
 
 # 函数说明：conversation_create
