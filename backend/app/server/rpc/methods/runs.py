@@ -328,6 +328,26 @@ async def run_context_evidence(
     }
 
 
+async def run_context_tool_view(
+    params: dict[str, Any],
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """第 step 步请求里，模型实际收到的这次工具输出（逐字，与发给适配器的一致）。"""
+    run_id = _require_str(params, "run_id")
+    step = _require_step(params)
+    tool_call_id = _require_str(params, "tool_call_id")
+    store = getattr(ctx.application, "run_step_store", None)
+    if store is None:
+        raise JsonRpcError(INVALID_STATE, "run step store is not ready")
+    view = await store.request_tool_view(run_id, step, tool_call_id)
+    if view is None:
+        raise JsonRpcError(
+            RESOURCE_NOT_FOUND,
+            "这一步没有记录请求里的工具视图（功能上线前的运行，或该工具不在这一步之前）",
+        )
+    return {"run_id": run_id, "step": step, **view}
+
+
 def _rewind_service(ctx: RpcContext) -> RewindService:
     service = ctx.application.rewind_service
     if service is None:
@@ -447,6 +467,7 @@ def register(dispatcher: RpcDispatcher) -> None:
     dispatcher.register("run.recover", run_recover)
     dispatcher.register("run.context.messages", run_context_messages)
     dispatcher.register("run.context.evidence", run_context_evidence)
+    dispatcher.register("run.context.tool_view", run_context_tool_view)
     dispatcher.register("run.steps.list", run_steps_list)
     dispatcher.register("run.rewind.preview", run_rewind_preview)
     dispatcher.register("run.rewind.apply", run_rewind_apply)

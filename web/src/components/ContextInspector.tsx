@@ -4,8 +4,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 
 import { getConversationConstraints, setConversationConstraints } from '../api/conversations'
-import { getRunContextMessages, getRunToolEvidence } from '../api/runs'
-import type { AgentEvent, Message } from '../api/types'
+import { getRunContextMessages, getRunToolEvidence, getRunToolView } from '../api/runs'
+import type { AgentEvent, Message, RequestToolView } from '../api/types'
 import {
   buildContextSteps,
   diffSummary,
@@ -14,7 +14,7 @@ import {
   SUMMARY_FIELDS,
   summaryEntries,
   type ContextStepVM,
-  type TruncatedToolVM,
+  type ToolNoticeVM,
 } from '../agent/runAnalysis'
 import { formatCacheHitRate, formatTokens } from '../agent/turnPresentation'
 import { toast } from '../stores/toasts'
@@ -22,8 +22,125 @@ import { EmptyState } from './ui'
 
 /** 打开某次工具调用的输出：模型实际收到的（截短版），或证据库里的完整原文。 */
 type OpenToolOutput =
-  | { kind: 'model'; tool: TruncatedToolVM }
+  | { kind: 'model'; step: number; toolCallId: string; toolName: string }
+  | { kind: 'stored'; toolCallId: string; toolName: string; output: string }
   | { kind: 'full'; toolCallId: string; toolName: string }
+
+function chars(value: number | null | undefined): string {
+  return value === null || value === undefined ? '?' : value.toLocaleString()
+}
+
+/** 三层长度：工具返回 → 执行器保存 → 本次请求。 */
+function lengthChain(notice: Pick<ToolNoticeVM, 'originalChars' | 'storedChars' | 'requestChars'>): string {
+  return `工具返回 ${chars(notice.originalChars)} → 执行器保存 ${chars(notice.storedChars)} → 本次请求 ${chars(notice.requestChars)} 字符`
+}
+
+function noticeText(notice: ToolNoticeVM): string {
+  switch (notice.kind) {
+    case 'shortened':
+      return `${notice.toolName}：${lengthChain(notice)}（上下文层保留开头和结尾，中间省略）`
+    case 'stored_truncated':
+      return `${notice.toolName}：${lengthChain(notice)}（执行器只保留了开头）`
+    case 'omitted':
+      return `${notice.toolName} 的输出从这一步起不在请求里（已被摘要替代或移出请求）`
+    default:
+      return `${notice.toolName} 输出过长，执行器保存了截短版本（没有请求记录，无法确认模型实际收到的内容）`
+  }
+}
+
+function ToolNoticeActions({
+  notice,
+  onOpenTool,
+}: {
+  notice: ToolNoticeVM
+  onOpenTool: (target: OpenToolOutput) => void
+}): React.JSX.Element {
+  const full = { kind: 'full' as const, toolCallId: notice.toolCallId, toolName: notice.toolName }
+  return (
+    <>
+      {notice.viewStep !== null ? (
+        <>
+          <button
+            type="button"
+            className="context-link"
+            onClick={() => onOpenTool({ kind: 'model', step: notice.viewStep!, toolCallId: notice.toolCallId, toolName: notice.toolName })}
+          >
+            查看模型收到的内容
+          </button>
+          {' · '}
+        </>
+      ) : notice.storedOutput !== null ? (
+        <>
+          <button
+            type="button"
+            className="context-link"
+            onClick={() => onOpenTool({ kind: 'stored', toolCallId: notice.toolCallId, toolName: notice.toolName, output: notice.storedOutput ?? '' })}
+          >
+            查看执行器保存的版本
+          </button>
+          {' · '}
+        </>
+      ) : null}
+      <button type="button" className="context-link" onClick={() => onOpenTool(full)}>查看完整工具原文</button>
+    </>
+  )
+}
+
+/** 所选步骤的请求里，每次工具调用模型实际收到多少。 */
+function RequestToolsSection({
+  step,
+  onOpenTool,
+}: {
+  step: ContextStepVM
+  onOpenTool?: (target: OpenToolOutput) => void
+}): React.JSX.Element | null {
+  if (!step.requestTools || step.requestTools.length === 0) return null
+  const status = (view: RequestToolView): string => {
+    if (!view.included) return '本次请求不包含'
+    if (view.request_shortened) return '上下文层截短'
+    if (view.stored_truncated) return '执行器截短'
+    return '完整'
+  }
+  return (
+    <section className="context-section">
+      <h3>本次请求中的工具输出</h3>
+      <table className="context-tool-table">
+        <thead>
+          <tr><th>工具</th><th>工具返回</th><th>执行器保存</th><th>本次请求</th><th>状态</th><th /></tr>
+        </thead>
+        <tbody>
+          {step.requestTools.map((view) => (
+            <tr key={view.tool_call_id} className={view.included && !view.request_shortened && !view.stored_truncated ? '' : 'changed'}>
+              <td className="mono">{view.tool_name ?? '工具'}</td>
+              <td className="mono">{chars(view.original_chars)}</td>
+              <td className="mono">{chars(view.stored_chars)}</td>
+              <td className="mono">{view.included ? chars(view.request_chars) : '—'}</td>
+              <td>{status(view)}</td>
+              <td>
+                {onOpenTool ? (
+                  <ToolNoticeActions
+                    notice={{
+                      toolCallId: view.tool_call_id,
+                      toolName: view.tool_name ?? '工具',
+                      kind: view.included ? 'shortened' : 'omitted',
+                      originalChars: view.original_chars,
+                      storedChars: view.stored_chars,
+                      requestChars: view.request_chars ?? null,
+                      viewStep: view.included ? step.step : null,
+                      storedOutput: null,
+                    }}
+                    onOpenTool={onOpenTool}
+                  />
+                ) : null}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="context-note">单位是字符。"本次请求"是模型在这一步实际看到的长度；完整原文始终保存在证据库。</p>
+    </section>
+  )
+}
 
 interface MessageRange {
   from: number
@@ -90,7 +207,7 @@ function ContextTimeline({
                   ? <span className="context-timeline__alert">⚠ {step.constraintsPossiblyDropped.length} 条约束可能丢失</span>
                   : null}
               </button>
-              {covered || step.truncatedTools.length > 0 || step.compactedToolResults > 0 || step.removedToolRounds > 0 || step.summaryError ? (
+              {covered || step.toolNotices.length > 0 || step.compactedToolResults > 0 || step.removedToolRounds > 0 || step.summaryError ? (
                 <ul className="context-timeline__details">
                   {covered ? (
                     <li>
@@ -107,24 +224,10 @@ function ContextTimeline({
                       </button>
                     </li>
                   ) : null}
-                  {step.truncatedTools.map((tool) => (
-                    <li key={tool.toolCallId}>
-                      · {tool.toolName} 输出过长，模型收到截短版本{' '}
-                      {onOpenTool ? (
-                        <>
-                          <button type="button" className="context-link" onClick={() => onOpenTool({ kind: 'model', tool })}>
-                            查看模型收到的内容
-                          </button>
-                          {' · '}
-                          <button
-                            type="button"
-                            className="context-link"
-                            onClick={() => onOpenTool({ kind: 'full', toolCallId: tool.toolCallId, toolName: tool.toolName })}
-                          >
-                            查看完整工具原文
-                          </button>
-                        </>
-                      ) : null}
+                  {step.toolNotices.map((notice) => (
+                    <li key={`${notice.toolCallId}-${notice.kind}`}>
+                      · {noticeText(notice)}{' '}
+                      {onOpenTool ? <ToolNoticeActions notice={notice} onOpenTool={onOpenTool} /> : null}
                     </li>
                   ))}
                   {step.compactedToolResults > 0 ? (
@@ -252,8 +355,8 @@ export function ToolOutputViewer({
   target: OpenToolOutput
   onClose: () => void
 }): React.JSX.Element {
-  const toolCallId = target.kind === 'model' ? target.tool.toolCallId : target.toolCallId
-  const toolName = target.kind === 'model' ? target.tool.toolName : target.toolName
+  const { toolCallId, toolName } = target
+  const viewStep = target.kind === 'model' ? target.step : null
   const [offset, setOffset] = useState(0)
   useEffect(() => setOffset(0), [toolCallId, target.kind])
   const query = useQuery({
@@ -262,17 +365,44 @@ export function ToolOutputViewer({
     enabled: target.kind === 'full',
     retry: false,
   })
+  const modelView = useQuery({
+    queryKey: ['run-tool-view', runId, viewStep, toolCallId],
+    queryFn: () => getRunToolView(runId, viewStep ?? 0, toolCallId),
+    enabled: viewStep !== null,
+    retry: false,
+  })
   const page = query.data
+  const title = target.kind === 'model'
+    ? `${toolName}：第 ${target.step} 步模型收到的内容`
+    : target.kind === 'stored' ? `${toolName}：执行器保存的版本` : `${toolName}：完整工具原文`
   return (
     <section className="context-section context-raw" aria-label="工具输出">
       <div className="context-section__heading">
-        <h3>{target.kind === 'model' ? `${toolName}：模型收到的内容（已截短）` : `${toolName}：完整工具原文`}</h3>
+        <h3>{title}</h3>
         <button type="button" className="context-link" onClick={onClose}>收起</button>
       </div>
       {target.kind === 'model' ? (
+        modelView.isPending ? <p className="context-muted">正在读取请求记录…</p>
+          : modelView.isError || !modelView.data ? (
+            <p className="context-warning">{modelView.error instanceof Error ? modelView.error.message : '没有这一步的请求记录'}</p>
+          ) : !modelView.data.included ? (
+            <p className="context-warning">这一步的请求不包含这次工具输出（已被摘要替代或移出请求）。</p>
+          ) : (
+            <>
+              <p className="context-note">
+                {lengthChain({
+                  originalChars: modelView.data.original_chars,
+                  storedChars: modelView.data.stored_chars,
+                  requestChars: modelView.data.request_chars ?? null,
+                })}。下面是这一步发给模型的工具消息原文，逐字一致。
+              </p>
+              <pre className="context-raw__pre">{modelView.data.content ?? '（空）'}</pre>
+            </>
+          )
+      ) : target.kind === 'stored' ? (
         <>
-          <p className="context-note">模型实际看到的是下面这段截短后的输出（{target.tool.modelOutput.length.toLocaleString()} 字符）。</p>
-          <pre className="context-raw__pre">{target.tool.modelOutput || '（空）'}</pre>
+          <p className="context-note">这是执行器保存的版本（{target.output.length.toLocaleString()} 字符）。没有请求记录，无法确认模型实际收到的内容。</p>
+          <pre className="context-raw__pre">{target.output || '（空）'}</pre>
         </>
       ) : query.isPending ? <p className="context-muted">正在读取完整原文…</p>
         : query.isError || !page ? (
@@ -580,6 +710,7 @@ export default function ContextInspector({
       {openTool && runId ? (
         <ToolOutputViewer runId={runId} target={openTool} onClose={() => setOpenTool(null)} />
       ) : null}
+      <RequestToolsSection step={selected} onOpenTool={runId ? setOpenTool : undefined} />
       <SummaryPanel key={selected.step} steps={steps} step={selected} canPin={Boolean(conversationId)} />
       {conversationId ? (
         <PinnedConstraintsEditor conversationId={conversationId} adoptedRevision={selected.constraintsRevision} />

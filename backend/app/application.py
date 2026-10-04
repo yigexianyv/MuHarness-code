@@ -456,6 +456,7 @@ class Application:
         self.run_store: SQLiteRunStore | None = None
         self.run_message_store: SQLiteRunMessageStore | None = None
         self.rewind_service: RewindService | None = None
+        self.run_step_store: SQLiteRunStepStore | None = None
         self.run_manager: RunManager | None = None
         self.conversation_service: ConversationService | None = None
         self.conversation_lifecycle: ConversationLifecycleService | None = None
@@ -900,6 +901,7 @@ class Application:
         self.checkpoint_store = checkpoint_store
         self.run_message_store = run_message_store
         self.rewind_service = rewind_service
+        self.run_step_store = run_step_store
         self.rule_store = rule_store
         self.policy_engine = policy_engine
         self.approval_store = approval_store

@@ -221,3 +221,112 @@ async def test_evidence_scope_follows_fork_chain_only(env) -> None:
         await run_context_evidence(
             {"run_id": "missing", "tool_call_id": "call-run-source"}, env.ctx
         )
+
+
+@pytest.mark.parametrize("size", [8_000, 8_001, 20_000, 20_001, 133_021])
+@pytest.mark.asyncio
+async def test_request_view_matches_what_adapter_received(tmp_path, size) -> None:
+    from app.runtime.rewind import SQLiteRunStepStore
+    from app.server.rpc.methods.runs import run_context_tool_view
+
+    database = tmp_path / "muharness.sqlite3"
+    conversations = SQLiteConversationStore(database)
+    await conversations.initialize()
+    evidence = SQLiteEvidenceStore(database)
+    await evidence.initialize()
+    steps = SQLiteRunStepStore(database)
+    await steps.initialize()
+    conversation = await conversations.create(title="边界")
+    payload = "HEAD_MARKER" + "x" * (size - len("HEAD_MARKER") - len("END_MARKER"))
+    payload += "END_MARKER"
+    assert len(payload) == size
+
+    class SizedTool(BaseTool):
+        definition = ToolDefinition(
+            name="dump",
+            description="sized output",
+            parameters={"type": "object", "properties": {}},
+        )
+
+        async def execute(self, arguments: dict[str, object]) -> str:
+            return payload
+
+    registry, adapter = fake_registry(
+        [
+            model_response(tool_calls=(ToolCall(id="c1", name="dump", arguments={}),)),
+            model_response(content="完成"),
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(SizedTool())
+    handler = InMemoryEventHandler()
+    await AgentRuntime(
+        registry,
+        tools,
+        provider="fake",
+        context_manager=ContextManager(estimator=DeterministicTokenEstimator()),
+        tool_output_recorder=EvidenceRecorder(evidence),
+        run_step_store=steps,
+    ).run("运行", conversation_id=conversation.id, run_id="r", event_handler=handler)
+
+    # 第 2 步请求：适配器实际收到的工具消息
+    sent = next(
+        message
+        for message in adapter.requests[1].messages
+        if message.role is MessageRole.TOOL
+    )
+    ctx = SimpleNamespace(application=SimpleNamespace(run_step_store=steps))
+    view = await run_context_tool_view(
+        {"run_id": "r", "step": 2, "tool_call_id": "c1"}, ctx
+    )
+    assert view["included"] is True
+    assert view["content"] == sent.content
+    assert view["original_chars"] == size
+
+    import json
+
+    sent_output = json.loads(sent.content)["output"]
+    assert view["request_chars"] == len(sent_output)
+    assert view["stored_truncated"] is (size > 20_000)
+    # 上下文层超过 8,000 字符才改写，改写后保留开头和结尾
+    assert view["request_shortened"] is (size > 8_000)
+    if size > 8_000:
+        assert view["request_chars"] < view["stored_chars"]
+        assert sent_output.startswith("HEAD_MARKER")
+    else:
+        assert sent_output == payload
+
+    started = [
+        event
+        for event in handler.events
+        if event.type is AgentEventType.MODEL_STARTED
+    ]
+    [meta] = started[1].request_tool_views
+    assert "content" not in meta
+    assert meta["request_chars"] == view["request_chars"]
+    assert meta["stored_chars"] == view["stored_chars"]
+
+
+def test_tool_not_in_request_is_reported_as_not_included() -> None:
+    from app.models.types import Message
+    from app.runtime.agent.loop import request_tool_views
+
+    raw = (
+        Message(role=MessageRole.USER, content="问题"),
+        Message(
+            role=MessageRole.ASSISTANT,
+            tool_calls=(ToolCall(id="old", name="read_file", arguments={}),),
+        ),
+        Message(
+            role=MessageRole.TOOL,
+            name="read_file",
+            tool_call_id="old",
+            content='{"output":"旧内容","output_chars":3}',
+        ),
+    )
+    # 摘要替代后，请求里只剩摘要和用户消息
+    request = (Message(role=MessageRole.SYSTEM, content="摘要"), raw[0])
+    [view] = request_tool_views(request, raw)
+    assert view["included"] is False
+    assert "content" not in view
+    assert view["original_chars"] == 3
