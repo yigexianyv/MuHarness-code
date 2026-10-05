@@ -1,8 +1,7 @@
 openai==2.50.0
-openai-agents==0.23.1
 anthropic==0.120.2
 mcp==1.29.0
-fastapi==0.141.2
+fastapi==0.141.1
 uvicorn[standard]==0.54.0
 pydantic-settings==2.14.2
 python-dotenv==1.2.4

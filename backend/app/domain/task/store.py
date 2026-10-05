@@ -121,7 +121,12 @@ class FileTaskStore:
         return task
 
     async def restart(self, task_id: str) -> Task:
-        """Create a fresh plan from current requirements, preserving the old task."""
+        """按当前要求新建一份已接受的计划，并把旧任务标记为已取消。
+
+        新任务直接是 ACTIVE，不再经过 PENDING → plan_accept 两步，避免中途失败时
+        留下一个没人接手的待确认任务；运行记录从零开始，旧运行仍挂在旧任务上。
+        旧任务写入失败时删除新任务，保证同一会话不会同时出现两个进行中的任务。
+        """
         async with self._lock_for(task_id):
             source = await self._require(task_id)
             now = datetime.now(UTC)
@@ -130,6 +135,7 @@ class FileTaskStore:
                 title=source.title,
                 description=source.description,
                 goal=source.goal,
+                status=TaskStatus.ACTIVE,
                 priority=source.priority,
                 constraints=source.constraints,
                 contract=source.contract,
@@ -139,13 +145,27 @@ class FileTaskStore:
                     if step.status is not TaskStepStatus.SUPERSEDED
                 ),
                 owner_conversation_id=source.owner_conversation_id,
-                run_ids=source.run_ids,
                 created_at=now,
                 updated_at=now,
             )
             if not task.steps:
                 raise ValueError("任务没有可重新执行的步骤")
             await self._write(task)
+            if source.status in _TERMINAL_STATUSES:
+                return task
+            retired = source.model_copy(
+                update={
+                    "status": TaskStatus.CANCELLED,
+                    "completed_at": now,
+                    "revision": source.revision + 1,
+                    "updated_at": now,
+                }
+            )
+            try:
+                await self._write(retired)
+            except BaseException:
+                await asyncio.to_thread(self._path(task.id).unlink, missing_ok=True)
+                raise
             return task
 
     # 函数说明：FileTaskStore.get

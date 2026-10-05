@@ -30,6 +30,7 @@ from app.models.types import (
     ToolPermission,
 )
 from app.runtime.agent.events import AgentEventType, InMemoryEventHandler
+from app.runtime.agent.loop import _PLAN_NO_VALID_TASK_MESSAGE
 from app.runtime.agent.runtime import AgentRuntime
 from app.tools.base import BaseTool
 from app.tools.registry import ToolRegistry
@@ -492,7 +493,7 @@ async def test_plan_mode_can_update_plan_content(tmp_path, status) -> None:
         assert result.plan_task_id is None
         assert result.tool_calls[0].result.success is False
         assert result.tool_calls[1].result.success is True
-        assert "without a valid pending task" not in result.content
+        assert _PLAN_NO_VALID_TASK_MESSAGE not in result.content
         assert f"状态仍为 {status.value}" in result.content
         assert "无需重新接受计划" in result.content
         if status is TaskStatus.PAUSED:
@@ -702,7 +703,7 @@ async def test_plan_mode_without_task_returns_clear_message(tmp_path) -> None:
 # 分支与异常：
 #   验证条件：`result.ok is True`。
 #   验证条件：`result.plan_task_id is None`。
-#   验证条件：`'without a valid pending task' in (result.content or '')`。
+#   验证条件：`_PLAN_NO_VALID_TASK_MESSAGE in (result.content or '')`。
 #   验证条件：`len(tasks) == 1`。
 async def test_plan_mode_invalid_pending_task_is_not_success(tmp_path) -> None:
 
@@ -721,7 +722,7 @@ async def test_plan_mode_invalid_pending_task_is_not_success(tmp_path) -> None:
 
     assert result.ok is True
     assert result.plan_task_id is None  
-    assert "without a valid pending task" in (result.content or "")
+    assert _PLAN_NO_VALID_TASK_MESSAGE in (result.content or "")
 
     tasks = await task_store.list()
     assert len(tasks) == 1
@@ -739,7 +740,7 @@ async def test_plan_mode_invalid_pending_task_is_not_success(tmp_path) -> None:
 # 分支与异常：
 #   验证条件：`result.ok is True`。
 #   验证条件：`result.plan_task_id is not None`。
-#   验证条件：`'without a valid pending task' not in (result.content or '')`。
+#   验证条件：`_PLAN_NO_VALID_TASK_MESSAGE not in (result.content or '')`。
 #   验证条件：`task is not None and task.status is TaskStatus.PENDING`。
 async def test_plan_mode_valid_pending_task_passes(tmp_path) -> None:
 
@@ -770,7 +771,7 @@ async def test_plan_mode_valid_pending_task_passes(tmp_path) -> None:
 
     assert result.ok is True
     assert result.plan_task_id is not None
-    assert "without a valid pending task" not in (result.content or "")
+    assert _PLAN_NO_VALID_TASK_MESSAGE not in (result.content or "")
     task = await task_store.get(result.plan_task_id)
     assert task is not None and task.status is TaskStatus.PENDING
 
