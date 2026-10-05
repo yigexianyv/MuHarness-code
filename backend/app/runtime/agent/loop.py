@@ -310,6 +310,7 @@ class AgentLoop:
         # 最近一次模型回复的结束原因。失败路径也要带出去：输出预算耗尽后又失败时，
         # 长任务靠它识别"输出被截断"，否则只能等停滞保护兜底
         last_finish_reason: str | None = None
+        unresolved_output_truncation = False
         context_session = RuntimeContextSession(
             memory_manager=self._memory_manager,
             skill_store=self._skill_store,
@@ -401,6 +402,7 @@ class AgentLoop:
                 summary_state=current_summary_state,
                 tool_result_views=tool_view_state.snapshot(messages),
                 model_finish_reason=last_finish_reason,
+                unresolved_output_truncation=unresolved_output_truncation,
             )
 
         # 函数说明：AgentLoop.run.stop_at_tool_round_limit
@@ -431,6 +433,7 @@ class AgentLoop:
                 summary_state=current_summary_state,
                 tool_result_views=tool_view_state.snapshot(messages),
                 model_finish_reason=last_finish_reason,
+                unresolved_output_truncation=unresolved_output_truncation,
             )
 
         for step in range(1, self._max_steps + 2):
@@ -1029,6 +1032,7 @@ class AgentLoop:
                 # Preserve tool evidence; recover the report without repeating tools.
                 audit_report_recovery_used = True
                 audit_report_recovery = True
+                unresolved_output_truncation = True
                 messages.pop()
                 request_prefix_state = None
                 retry_max_output_tokens = min(
@@ -1213,6 +1217,11 @@ class AgentLoop:
                     usage=usage,
                     plan_task_id=plan_task_id,
                     model_finish_reason=response.finish_reason,
+                    # Clear after a usable, non-truncated report survives validation.
+                    unresolved_output_truncation=(
+                        unresolved_output_truncation
+                        and response.finish_reason in {"max_tokens", "length"}
+                    ),
                     summary_state=current_summary_state,
                     tool_result_views=tool_view_state.snapshot(messages),
                 )
@@ -1291,6 +1300,7 @@ class AgentLoop:
             summary_state=current_summary_state,
             tool_result_views=tool_view_state.snapshot(messages),
             model_finish_reason=last_finish_reason,
+            unresolved_output_truncation=unresolved_output_truncation,
         )
 
     # 函数说明：AgentLoop._error_message
@@ -1344,6 +1354,7 @@ class AgentLoop:
         summary_state: ConversationSummaryState | None = None,
         plan_task_id: str | None = None,
         model_finish_reason: str | None = None,
+        unresolved_output_truncation: bool = False,
         tool_result_views: Sequence[ToolResultView] = (),
     ) -> AgentResult:
         complete_messages = tuple(messages)
@@ -1367,6 +1378,7 @@ class AgentLoop:
             summary_state=summary_state,
             plan_task_id=plan_task_id,
             model_finish_reason=model_finish_reason,
+            unresolved_output_truncation=unresolved_output_truncation,
             tool_result_views=tuple(tool_result_views),
         )
 

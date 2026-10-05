@@ -2242,7 +2242,9 @@ def test_mea_start_runs_to_completion_over_rpc(make_app, tmp_path) -> None:
             _model_response(content="表头是 id,name"),
             _model_response(content=_MEA_REPORT),
             _model_response(content=_mea_manager("下一步: 最终验收\n验收重点: 表头")),
-            _model_response(content=_MEA_REPORT),
+            _model_response(content=_MEA_REPORT.replace(
+                "步骤验收: satisfied", "步骤验收: not_applicable",
+            )),
             _model_response(content="长任务已完成：表头是 id,name。"),
         ]
     )
@@ -2285,11 +2287,15 @@ def test_mea_start_runs_to_completion_over_rpc(make_app, tmp_path) -> None:
             # mea']['id'] == mea_id and (m['params']['…`。
             # 闭包依赖：从外层读取 `mea_id`。
             def completed(m: dict[str, Any]) -> bool:
-                return (
-                    m.get("method") == "mea.status"
-                    and m["params"]["mea"]["id"] == mea_id
-                    and m["params"]["mea"]["status"] == "completed"
-                )
+                if m.get("method") != "mea.status":
+                    return False
+                mea = m["params"]["mea"]
+                if mea["id"] != mea_id:
+                    return False
+                assert mea["status"] not in {
+                    "failed", "cancelled", "waiting_user", "paused",
+                }, mea
+                return mea["status"] == "completed"
 
             if not any(completed(m) for m in early):
                 _drain_until(websocket, completed, limit=5_000)
