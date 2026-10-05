@@ -347,7 +347,6 @@ class MeaRunner:
             if restart:
                 await self.preflight(task, original_request)
                 task = await self._tasks.restart(task.id)
-                task = await self._tasks.plan_accept(task.id)
             if task.status is not TaskStatus.ACTIVE:
                 raise MeaStartError(f"只有进行中的任务可以启动长任务（当前 {task.status.value}）")
             requirements = await self.preflight(task, original_request)

@@ -543,15 +543,21 @@ async def test_explicit_execution_preserves_or_resets_progress(tmp_path, restart
     assert result["mea"].task_id == executed.id
     assert executed.status is TaskStatus.ACTIVE
     assert executed.constraints == ("only workspace",)
-    assert executed.run_ids == before.run_ids
     assert executed.steps[0].acceptance == "read file"
     assert executed.steps[1].acceptance == "verify file"
-    assert await app.task_store.get(task.id) == before
     if restart:
+        # 旧任务保留进度但不再进行中，新任务的运行记录从零开始
+        old = await app.task_store.get(task.id)
+        assert old.status is TaskStatus.CANCELLED
+        assert old.steps == before.steps
+        assert executed.run_ids == ()
+        active = await app.task_store.active_for_conversation(conversation.id)
+        assert active.id == executed.id
         assert all(s.status is TaskStepStatus.TODO for s in executed.steps)
         assert all(s.note is None for s in executed.steps)
         assert executed.state == () and executed.applied_ops == {}
     else:
+        assert executed.run_ids == before.run_ids
         assert executed.steps == before.steps
     requirements = await app.mea_store.requirements(result["mea"].id)
     assert requirements.original_request == "把 users.csv 导入数据库"
@@ -573,6 +579,34 @@ async def test_restart_does_not_duplicate_a_running_task(tmp_path):
     errors = [r for r in results if isinstance(r, JsonRpcError)]
     assert len(errors) == 1 and errors[0].code == INVALID_STATE
     assert len(list(app.task_store.tasks_dir.glob("*.json"))) == 2
+    statuses = sorted(t.status.value for t in await app.task_store.list())
+    assert statuses == ["active", "cancelled"]
+
+
+async def test_restart_keeps_original_when_new_task_cannot_be_written(
+    tmp_path, monkeypatch,
+):
+    app = await _app(tmp_path)
+    conversation = await app.conversation_store.create()
+    task = await _plan(app, conversation.id)
+    await app.task_store.plan_accept(task.id)
+    before = await app.task_store.get(task.id)
+    store = app.task_store
+    original_write = store._write
+
+    async def failing_write(item):
+        if item.id == task.id:
+            raise OSError("disk full")
+        await original_write(item)
+
+    monkeypatch.setattr(store, "_write", failing_write)
+    with pytest.raises(OSError):
+        await mea_rpc.mea_start({
+            "conversation_id": conversation.id, "task_id": task.id, "restart": True,
+        }, _ctx(app))
+    monkeypatch.setattr(store, "_write", original_write)
+    assert [t.id for t in await store.list()] == [task.id]
+    assert await store.get(task.id) == before
 
 
 async def test_restart_rejects_other_conversation_and_invalid_options(tmp_path):

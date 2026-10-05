@@ -116,7 +116,9 @@ _EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS = 8192
 
 _PLAN_NO_TASK_MESSAGE = "本轮未保存新的执行计划，也未重新执行任务。"
 _PLAN_SAVE_FAILED_MESSAGE = "本轮计划未成功保存，请查看工具返回的失败原因。"
-_PLAN_NO_VALID_TASK_MESSAGE = "Plan mode finished without a valid pending task."
+_PLAN_NO_VALID_TASK_MESSAGE = (
+    "本轮创建的计划不完整（例如缺少步骤），未能进入待确认状态。"
+)
 _RUN_BUDGET_FINALIZATION_MESSAGE = (
     "运行阶段：预算收尾。Main Agent 已达到用量收口线，本轮禁止工具调用。"
     "立即依据现有证据答复：已完成什么、哪些未完成或无法验证，以及可用的交付位置。"
