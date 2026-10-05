@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -225,6 +226,11 @@ def title_from_content(content: str) -> str:
 
     title = " ".join(content.split()).strip()
     return title[:40] or "新会话"
+
+
+def _sandbox_instance_id(database: Path) -> str:
+    """同一个数据库对应同一个实例：重启后能认出自己上次留下的沙箱容器。"""
+    return hashlib.sha256(str(database).encode("utf-8")).hexdigest()[:16]
 
 
 # 函数说明：_data_paths_inside
@@ -532,7 +538,16 @@ class Application:
                 rule_label_factory=describe_safe_rule,
             )
 
-        sandbox_supervisor = SandboxSupervisor(self.workspace_root)
+        sandbox_supervisor = SandboxSupervisor(
+            self.workspace_root,
+            instance_id=_sandbox_instance_id(database),
+        )
+        # 必须在恢复任何运行之前：上次被强杀时遗留的容器会继续写工作区，
+        # 恢复审计会把这些变化误判成审计者越权
+        try:
+            await sandbox_supervisor.remove_orphans()
+        except Exception:
+            logger.exception("failed to remove orphaned sandbox containers")
         tool_registry = build_builtin_tool_registry(
             self.workspace_root,
             sandbox_supervisor=sandbox_supervisor,

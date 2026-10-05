@@ -307,6 +307,9 @@ class AgentLoop:
         main_model_calls = 0
         budget_chargeable_tokens = 0
         current_summary_state = summary_state
+        # 最近一次模型回复的结束原因。失败路径也要带出去：输出预算耗尽后又失败时，
+        # 长任务靠它识别"输出被截断"，否则只能等停滞保护兜底
+        last_finish_reason: str | None = None
         context_session = RuntimeContextSession(
             memory_manager=self._memory_manager,
             skill_store=self._skill_store,
@@ -397,6 +400,7 @@ class AgentLoop:
                 error=error,
                 summary_state=current_summary_state,
                 tool_result_views=tool_view_state.snapshot(messages),
+                model_finish_reason=last_finish_reason,
             )
 
         # 函数说明：AgentLoop.run.stop_at_tool_round_limit
@@ -426,6 +430,7 @@ class AgentLoop:
                 usage=usage,
                 summary_state=current_summary_state,
                 tool_result_views=tool_view_state.snapshot(messages),
+                model_finish_reason=last_finish_reason,
             )
 
         for step in range(1, self._max_steps + 2):
@@ -976,6 +981,7 @@ class AgentLoop:
                     )
 
                 model_started_at = perf_counter()
+                last_finish_reason = None
                 response = await adapter.complete_stream(
                     ModelRequest(
                         messages=request_messages,
@@ -993,6 +999,7 @@ class AgentLoop:
                     step=step,
                 )
 
+            last_finish_reason = response.finish_reason
             usage = add_usage(usage, response.usage)
             main_model_calls += max(1, response.usage.model_calls)
             budget_chargeable_tokens += chargeable_tokens(response.usage)
@@ -1283,6 +1290,7 @@ class AgentLoop:
             error=error,
             summary_state=current_summary_state,
             tool_result_views=tool_view_state.snapshot(messages),
+            model_finish_reason=last_finish_reason,
         )
 
     # 函数说明：AgentLoop._error_message

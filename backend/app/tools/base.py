@@ -43,3 +43,12 @@ class BaseTool(ABC):
     ) -> Any:
 
         return await self.execute(arguments)
+
+    def execution_timeout(self, arguments: dict[str, Any]) -> float | None:
+        """本次调用需要的执行时限（秒）；None 表示使用执行器的统一时限。
+
+        自带超时参数的工具（如 Shell）在这里声明实际需要的时间，执行器据此放宽外层时限，
+        避免外层先于工具自己的超时处理把调用取消。
+        """
+        del arguments
+        return None

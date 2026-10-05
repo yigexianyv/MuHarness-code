@@ -318,6 +318,16 @@ class ToolExecutor:
         except Exception as exc:
             return f"Permission check failed: {type(exc).__name__}: {exc}"
 
+    def _timeout_for(self, tool: BaseTool, arguments: dict[str, Any]) -> float:
+        """外层时限取统一时限与工具自报时限中较大者，不让外层抢先取消工具。"""
+        try:
+            requested = tool.execution_timeout(arguments)
+        except Exception:
+            requested = None
+        if requested is None or requested <= 0:
+            return self._timeout_seconds
+        return max(self._timeout_seconds, float(requested))
+
     # 函数说明：ToolExecutor._dispatch
     # 用途：解析工具参数并限时执行；把参数错误、超时和工具异常转换为失败结果，保存原始证
     # 据后截断展示输出。
@@ -361,13 +371,14 @@ class ToolExecutor:
                 started_at,
             )
 
+        timeout_seconds = self._timeout_for(tool, arguments)
         try:
-            async with asyncio.timeout(self._timeout_seconds):
+            async with asyncio.timeout(timeout_seconds):
                 output = await tool.execute_with_context(arguments, context)
         except TimeoutError:
             return self._failure(
                 tool_call,
-                f"Tool timed out after {self._timeout_seconds:g} seconds.",
+                f"Tool timed out after {timeout_seconds:g} seconds.",
                 started_at,
             )
         except (KeyError, TypeError, ValueError) as exc:
