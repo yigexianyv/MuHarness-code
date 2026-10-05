@@ -49,11 +49,17 @@ class SandboxSupervisor:
         workspace_root: str | Path,
         *,
         native_backend: SandboxBackend | None = None,
+        instance_id: str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         self._native_backend = native_backend or _platform_backend(
-            self.workspace_root
+            self.workspace_root,
+            instance_id=instance_id,
         )
+
+    async def remove_orphans(self) -> int:
+        """清理上一次进程被强杀时遗留的沙箱，返回清理数量。"""
+        return await self._native_backend.remove_orphans()
 
     # 函数说明：SandboxSupervisor.prepare_launch
     # 用途：根据工作目录和额外挂载生成沙箱启动参数。
@@ -229,7 +235,11 @@ class SandboxSupervisor:
 # `UnsupportedSandboxBackend(…)`。
 #   当 `requested in {'auto', 'docker'}` 时，返回 `DockerSandboxBackend(workspace_root)`
 # 。
-def _platform_backend(workspace_root: Path) -> SandboxBackend:
+def _platform_backend(
+    workspace_root: Path,
+    *,
+    instance_id: str | None = None,
+) -> SandboxBackend:
     requested = preferred_env(
         "MUHARNESS_SANDBOX_BACKEND", "VESTA_SANDBOX_BACKEND", "auto"
     ).strip().lower()
@@ -238,7 +248,7 @@ def _platform_backend(workspace_root: Path) -> SandboxBackend:
             f"未知 MUHARNESS_SANDBOX_BACKEND={requested!r}"
         )
     if requested in {"auto", "docker"}:
-        return DockerSandboxBackend(workspace_root)
+        return DockerSandboxBackend(workspace_root, instance_id=instance_id)
     return UnsupportedSandboxBackend("docker disabled")
 
 

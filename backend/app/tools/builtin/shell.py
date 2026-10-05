@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from ..hooks import ToolExecutionContext
 
 MAX_SHELL_TIMEOUT_SECONDS = 120.0
+DEFAULT_SHELL_TIMEOUT_SECONDS = 30.0
+# 命令超时后还要终止进程、删除容器（最多 10 秒）；外层时限需要留出这段余量
+SHELL_CLEANUP_GRACE_SECONDS = 15.0
 
 
 class ShellCommandTool(BaseTool):
@@ -99,6 +102,13 @@ class ShellCommandTool(BaseTool):
             strict=True,
             permission=ToolPermission.HUMAN_APPROVAL,
         )
+
+    def execution_timeout(self, arguments: dict[str, Any]) -> float | None:
+        try:
+            timeout = _command_timeout(arguments)
+        except ValueError:
+            return None  # 参数非法时由 execute 报错，执行器沿用统一时限
+        return timeout + SHELL_CLEANUP_GRACE_SECONDS
 
     # 函数说明：ShellCommandTool.execute
     # 用途：执行ShellCommandTool，供内置工作区工具使用。
@@ -177,10 +187,7 @@ class ShellCommandTool(BaseTool):
                 allow_root=True,
             )
 
-        timeout = arguments.get("timeout_seconds", 30.0)
-        if not isinstance(timeout, (int, float)) or timeout <= 0:
-            raise ValueError("'timeout_seconds' must be a positive number")
-        timeout = min(float(timeout), MAX_SHELL_TIMEOUT_SECONDS)
+        timeout = _command_timeout(arguments)
 
         started_at = perf_counter()
         timed_out = False
@@ -283,6 +290,13 @@ def _shell_environment() -> dict[str, str]:
         "DOCKER_HOST",
     )
     return {key: os.environ[key] for key in safe_keys if os.environ.get(key)}
+
+
+def _command_timeout(arguments: dict[str, Any]) -> float:
+    timeout = arguments.get("timeout_seconds", DEFAULT_SHELL_TIMEOUT_SECONDS)
+    if not isinstance(timeout, (int, float)) or timeout <= 0:
+        raise ValueError("'timeout_seconds' must be a positive number")
+    return min(float(timeout), MAX_SHELL_TIMEOUT_SECONDS)
 
 
 # 函数说明：_cleanup_sandbox_launch

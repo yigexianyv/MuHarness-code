@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import shutil
 import tempfile
@@ -17,6 +19,11 @@ from .models import (
     SandboxNetworkMode,
     SandboxPolicy,
 )
+
+logger = logging.getLogger("muharness.sandbox")
+
+SANDBOX_LABEL = "com.muharness.sandbox"
+INSTANCE_LABEL = "com.muharness.instance"
 
 
 class SandboxBackend(ABC):
@@ -42,6 +49,10 @@ class SandboxBackend(ABC):
         policy: SandboxPolicy,
     ) -> SandboxLaunchSpec:
         pass
+
+    async def remove_orphans(self) -> int:
+        """清理上一次进程遗留、仍在运行的沙箱；没有可清理的对象时返回 0。"""
+        return 0
 
 
 class UnsupportedSandboxBackend(SandboxBackend):
@@ -108,8 +119,11 @@ class DockerSandboxBackend(SandboxBackend):
         memory: str = "2g",
         cpus: str = "2",
         pids_limit: int = 128,
+        instance_id: str | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
+        # 区分同一台 Docker 上的多个后端：启动清理只删除本实例创建的容器
+        self.instance_id = instance_id
         self.docker_command = (
             str(docker_command)
             if docker_command is not None
@@ -166,7 +180,7 @@ class DockerSandboxBackend(SandboxBackend):
             "--name",
             container_name,
             "--label",
-            "com.muharness.sandbox=true",
+            f"{SANDBOX_LABEL}=true",
             "--read-only",
             "--cap-drop",
             "ALL",
@@ -183,6 +197,8 @@ class DockerSandboxBackend(SandboxBackend):
             "--user",
             _container_user(),
         ]
+        if self.instance_id:
+            docker_args.extend(("--label", f"{INSTANCE_LABEL}={self.instance_id}"))
         if policy.network is SandboxNetworkMode.DENIED:
             docker_args.extend(("--network", "none"))
 
@@ -222,6 +238,42 @@ class DockerSandboxBackend(SandboxBackend):
     # 关键调用（按源码出现顺序，实际执行取决于分支）：`root.is_relative_to`。
     # 分支与异常：
     #   当 `external` 时，抛出 `SandboxUnavailableError(…)`。
+    async def remove_orphans(self) -> int:
+        """删除本实例上次运行遗留的容器。
+
+        正常结束时 Shell 会在 finally 里删除容器；后端进程被强杀时执行不到，
+        容器会继续运行并写工作区。启动时、在恢复任何运行之前调用：此时本进程
+        还没有启动沙箱，带本实例标签的容器一定是遗留的。没有 instance_id 时
+        不清理，避免误删其他后端正在使用的容器。
+        """
+        if not self.docker_command or not self.instance_id:
+            return 0
+        listed = await _run_docker(
+            self.docker_command,
+            "ps",
+            "--all",
+            "--quiet",
+            "--filter",
+            f"label={SANDBOX_LABEL}=true",
+            "--filter",
+            f"label={INSTANCE_LABEL}={self.instance_id}",
+        )
+        if listed is None:
+            return 0
+        container_ids = [line.strip() for line in listed.splitlines() if line.strip()]
+        if not container_ids:
+            return 0
+        removed = await _run_docker(
+            self.docker_command, "rm", "--force", "--volumes", *container_ids
+        )
+        if removed is None:
+            return 0
+        logger.warning(
+            "removed %d orphaned sandbox container(s) left by a previous process",
+            len(container_ids),
+        )
+        return len(container_ids)
+
     def _reject_external_roots(self, policy: SandboxPolicy) -> None:
         roots = (*policy.readable_roots, *policy.writable_roots)
         external = tuple(
@@ -357,6 +409,33 @@ def resolve_executable(command: str, *, env: dict[str, str]) -> Path:
     if not resolved.is_file() or not executable.is_file():
         raise SandboxUnavailableError(f"可执行文件无效：{executable}")
     return executable
+
+
+async def _run_docker(
+    docker_command: str, *args: str, timeout: float = 30
+) -> str | None:
+    """执行一条 docker 命令，返回标准输出；Docker 不可用或失败时返回 None。"""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            docker_command,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        async with asyncio.timeout(timeout):
+            stdout, stderr = await process.communicate()
+    except (OSError, TimeoutError) as exc:
+        logger.warning("docker %s failed: %s", args[0], exc)
+        return None
+    if process.returncode != 0:
+        logger.warning(
+            "docker %s exited with %s: %s",
+            args[0],
+            process.returncode,
+            stderr.decode("utf-8", errors="replace").strip(),
+        )
+        return None
+    return stdout.decode("utf-8", errors="replace")
 
 
 __all__ = [
