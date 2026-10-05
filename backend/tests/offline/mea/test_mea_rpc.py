@@ -512,3 +512,105 @@ async def test_list_without_conversation_returns_all(tmp_path) -> None:
     assert [mea.conversation_id for mea in only_first["meas"]] == [first.id]
     with pytest.raises(JsonRpcError):
         await mea_rpc.mea_list({"conversation_id": ""}, _ctx(app))
+
+
+@pytest.mark.parametrize("restart", [False, True])
+async def test_explicit_execution_preserves_or_resets_progress(tmp_path, restart):
+    from app.domain.task import TaskStepStatus
+
+    app = await _app(tmp_path)
+    conversation = await app.conversation_store.create()
+    task = await _plan(app, conversation.id)
+    await app.task_store.replace_steps(task.id, (
+        TaskStep(id="s1", title="read", acceptance="read file"),
+        TaskStep(id="s2", title="write", acceptance="verify file"),
+    ))
+    await app.task_store.plan_accept(task.id)
+    await app.task_store.set_step_status(
+        task.id, "s1", TaskStepStatus.DONE, note="verified",
+    )
+    await app.task_store.set_step_status(
+        task.id, "s2", TaskStepStatus.IN_PROGRESS, note="started",
+    )
+    await app.task_store.add_constraints(task.id, "only workspace")
+    await app.task_store.update_state(task.id, "s1 already done")
+    before = await app.task_store.get(task.id)
+    result = await mea_rpc.mea_start({
+        "conversation_id": conversation.id, "task_id": task.id, "restart": restart,
+    }, _ctx(app))
+    executed = result["task"]
+    assert (executed.id != task.id) is restart
+    assert result["mea"].task_id == executed.id
+    assert executed.status is TaskStatus.ACTIVE
+    assert executed.constraints == ("only workspace",)
+    assert executed.run_ids == before.run_ids
+    assert executed.steps[0].acceptance == "read file"
+    assert executed.steps[1].acceptance == "verify file"
+    assert await app.task_store.get(task.id) == before
+    if restart:
+        assert all(s.status is TaskStepStatus.TODO for s in executed.steps)
+        assert all(s.note is None for s in executed.steps)
+        assert executed.state == () and executed.applied_ops == {}
+    else:
+        assert executed.steps == before.steps
+    requirements = await app.mea_store.requirements(result["mea"].id)
+    assert requirements.original_request == "把 users.csv 导入数据库"
+
+
+async def test_restart_does_not_duplicate_a_running_task(tmp_path):
+    import asyncio
+
+    app = await _app(tmp_path)
+    conversation = await app.conversation_store.create()
+    task = await _plan(app, conversation.id)
+    params = {"conversation_id": conversation.id, "task_id": task.id, "restart": True}
+    results = await asyncio.gather(
+        mea_rpc.mea_start(params, _ctx(app)),
+        mea_rpc.mea_start(params, _ctx(app)),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(r, dict) for r in results) == 1
+    errors = [r for r in results if isinstance(r, JsonRpcError)]
+    assert len(errors) == 1 and errors[0].code == INVALID_STATE
+    assert len(list(app.task_store.tasks_dir.glob("*.json"))) == 2
+
+
+async def test_restart_rejects_other_conversation_and_invalid_options(tmp_path):
+    app = await _app(tmp_path)
+    conversation = await app.conversation_store.create()
+    other = await app.conversation_store.create()
+    task = await _plan(app, conversation.id)
+    for params, code in [
+        (
+            {"conversation_id": other.id, "task_id": task.id, "restart": True},
+            RESOURCE_NOT_FOUND,
+        ),
+        (
+            {"conversation_id": conversation.id, "task_id": task.id, "restart": "true"},
+            RpcErrorCode.INVALID_PARAMS,
+        ),
+    ]:
+        with pytest.raises(JsonRpcError) as error:
+            await mea_rpc.mea_start(params, _ctx(app))
+        assert error.value.code == code
+    assert len(list(app.task_store.tasks_dir.glob("*.json"))) == 1
+
+
+@pytest.mark.parametrize("status", [TaskStatus.COMPLETED, TaskStatus.FAILED])
+async def test_restart_closed_task_preserves_original(tmp_path, status):
+    from app.domain.task import TaskStepStatus
+
+    app = await _app(tmp_path)
+    conversation = await app.conversation_store.create()
+    task = await _plan(app, conversation.id)
+    await app.task_store.plan_accept(task.id)
+    await app.task_store.set_step_status(
+        task.id, "s1", TaskStepStatus.DONE, note="verified",
+    )
+    before = await app.task_store.set_status(task.id, status)
+    result = await mea_rpc.mea_start({
+        "conversation_id": conversation.id, "task_id": task.id, "restart": True,
+    }, _ctx(app))
+    assert result["task"].id != task.id
+    assert result["task"].steps[0].status is TaskStepStatus.TODO
+    assert await app.task_store.get(task.id) == before

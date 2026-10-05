@@ -461,23 +461,27 @@ export default function ChatPage({
     mutationFn: (input: {
       conversationId: string
       taskId: string
+      restart?: boolean
       roundBudget?: number
       extraTools?: string[]
       autoApproveSandbox?: boolean
     }) =>
       startMea(input.conversationId, input.taskId, {
+        restart: input.restart,
         roundBudget: input.roundBudget,
         extraTools: input.extraTools,
         autoApproveSandbox: input.autoApproveSandbox,
       }),
     onSuccess: ({ mea, task }, variables) => {
       queryClient.setQueryData<Task[]>(['tasks', task.owner_conversation_id], (tasks) =>
-        tasks?.map((existing) => existing.id === task.id ? task : existing),
+        [task, ...(tasks ?? []).filter((existing) => existing.id !== task.id)],
       )
       draftStore.update(task.owner_conversation_id, { mode: 'normal' })
       refreshDraft()
       if (selectedIdRef.current === variables.conversationId) {
-        setPlanResolved('计划已接受，长任务已启动：每一轮都会先执行、再由审计者独立验收。')
+        setPlanResolved(variables.restart
+          ? '已创建新任务，从第 1 阶段重新执行；旧任务记录保留。'
+          : '已开始执行所选任务的剩余阶段，已完成阶段保持不变。')
         setMeaNotice(null)
       }
       refreshMea(mea.id, variables.conversationId)
@@ -738,20 +742,19 @@ export default function ChatPage({
         />
         <CurrentTaskPanel
           tasks={conversationTasks}
-          busy={sendMutation.isPending || startMeaMutation.isPending}
+          busy={isRunning || meaBusy || sendMutation.isPending || startMeaMutation.isPending}
           lockedTaskIds={lockedTaskIds}
-          onExecute={(task) => {
-            setMode('normal')
-            sendMutation.mutate({
-              conversationId: task.owner_conversation_id,
-              content: '继续执行当前任务。按剩余步骤逐项实施、验证并更新任务状态。',
-              sendMode: 'normal',
-            })
-          }}
-          onExecuteLong={(task) =>
+          onExecute={(task) =>
             startMeaMutation.mutate({
               conversationId: task.owner_conversation_id,
               taskId: task.id,
+            })
+          }
+          onRestart={(task) =>
+            startMeaMutation.mutate({
+              conversationId: task.owner_conversation_id,
+              taskId: task.id,
+              restart: true,
             })
           }
         />

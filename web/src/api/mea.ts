@@ -3,6 +3,8 @@ import { RpcMethods } from '../rpc/methods'
 import type { MeaAmendResult, MeaDetail, MeaRun, MeaStatus, Task } from './types'
 
 export interface StartMeaOptions {
+  /** 创建全新任务，从第一个步骤执行，保留旧任务记录。 */
+  restart?: boolean
   /** 轮次预算，默认 25。 */
   roundBudget?: number
   /** 额外授权给 Executor 的工具（只能是 mea.tools 列出的）。 */
@@ -23,6 +25,7 @@ export async function startMea(
     conversation_id: conversationId,
     task_id: taskId,
   }
+  if (options.restart !== undefined) params.restart = options.restart
   if (options.roundBudget !== undefined) params.round_budget = options.roundBudget
   if (options.extraTools && options.extraTools.length > 0) params.extra_tools = options.extraTools
   if (options.originalRequest) params.original_request = options.originalRequest

@@ -2275,3 +2275,53 @@ async def test_amendment_resets_the_stall_guard(tmp_path: Path) -> None:
 
     assert (await env.store.require(mea_id)).stall_guard_after == 3
     assert mea.status is MeaStatus.BLOCKED
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_verdict_replace_failure_is_retried_or_reported(
+    tmp_path: Path, monkeypatch, persistent: bool,
+) -> None:
+    import json
+
+    from app.domain.task import store as task_store
+
+    script = Script(
+        manager=[manager(execute("s1")), manager(execute("s2")), manager(FINAL)],
+        executor=["read", "imported"],
+        auditor=[report(), report(), report(step="not_applicable")],
+    )
+    env = await _env(tmp_path, script)
+    runner = env.runner()
+    mea_id = await _start(env, runner)
+    replace = task_store.os.replace
+    attempts = 0
+
+    def replace_verdict(source, target):
+        nonlocal attempts
+        payload = json.loads(Path(source).read_text(encoding="utf-8"))
+        if f"{mea_id}/r002/verdict" in payload["applied_ops"]:
+            attempts += 1
+            if persistent or attempts == 1:
+                error = PermissionError("task file is busy")
+                error.winerror = 32
+                raise error
+        replace(source, target)
+
+    monkeypatch.setattr(task_store.os, "replace", replace_verdict)
+    monkeypatch.setattr(task_store.time, "sleep", lambda _: None)
+    result = await runner._run_logged(mea_id)
+    saved = await env.store.require(mea_id)
+    task = await env.tasks.get(result.task_id)
+    assert script.count(AgentMode.EXECUTE) == 2
+    if persistent:
+        assert attempts == 4
+        assert saved.status is MeaStatus.FAILED
+        assert "PermissionError: task file is busy" in saved.abort_reason
+        assert task.steps[-1].status is TaskStepStatus.IN_PROGRESS
+        last = (await env.store.rounds(mea_id))[-1]
+        assert last.phase is RoundPhase.AUDITED
+        assert last.verdict_patch is not None
+    else:
+        assert saved.status is MeaStatus.COMPLETED
+        assert task.status is TaskStatus.COMPLETED
+        assert saved.abort_reason is None

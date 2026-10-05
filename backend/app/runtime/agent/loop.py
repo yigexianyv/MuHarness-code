@@ -114,7 +114,8 @@ _PLAN_MODE_SYSTEM_MESSAGE = (
 
 _EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS = 8192
 
-_PLAN_NO_TASK_MESSAGE = "Plan mode finished without creating a task."
+_PLAN_NO_TASK_MESSAGE = "本轮未保存新的执行计划，也未重新执行任务。"
+_PLAN_SAVE_FAILED_MESSAGE = "本轮计划未成功保存，请查看工具返回的失败原因。"
 _PLAN_NO_VALID_TASK_MESSAGE = "Plan mode finished without a valid pending task."
 _RUN_BUDGET_FINALIZATION_MESSAGE = (
     "运行阶段：预算收尾。Main Agent 已达到用量收口线，本轮禁止工具调用。"
@@ -1175,10 +1176,16 @@ class AgentLoop:
                         plan_task_id = None
                         messages[-1] = final_message
                     elif plan_status is not TaskStatus.PENDING:
+                        save_attempted = any(
+                            record.tool_call.name in ("task_create", "task_update")
+                            for record in tool_calls
+                        )
                         prefix = (
-                            _PLAN_NO_TASK_MESSAGE
-                            if not plan_task_created
-                            else _PLAN_NO_VALID_TASK_MESSAGE
+                            _PLAN_NO_VALID_TASK_MESSAGE
+                            if plan_task_created
+                            else _PLAN_SAVE_FAILED_MESSAGE
+                            if save_attempted
+                            else _PLAN_NO_TASK_MESSAGE
                         )
                         final_message = plan_failure_message(
                             assistant_message,

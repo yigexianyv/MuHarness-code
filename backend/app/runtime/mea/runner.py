@@ -294,6 +294,7 @@ class MeaRunner:
         self._recovery_info = recovery_info
         self._executor_evidence = executor_evidence
         self._timeouts = dict(role_timeouts or {})
+        self._start_lock = asyncio.Lock()
         self._loop_locks: dict[str, asyncio.Lock] = {}
         self._amend_locks: dict[str, asyncio.Lock] = {}
         self._loops: dict[str, asyncio.Task[MeaRun]] = {}
@@ -331,31 +332,41 @@ class MeaRunner:
         extra_tools: Sequence[str] = (),
         auto_approve_sandbox: bool = True,
         spawn: bool = True,
+        restart: bool = False,
     ) -> MeaRun:
         """为一个已接受的计划启动长任务。缺验收标准或要求超长时拒绝启动。"""
 
-        task = await self._tasks.resolve(task_id, owner_conversation_id=conversation_id)
-        if task is None:
-            raise MeaStartError(f"任务不存在：{task_id}")
-        if task.status is not TaskStatus.ACTIVE:
-            raise MeaStartError(f"只有进行中的任务可以启动长任务（当前 {task.status.value}）")
-        requirements = await self.preflight(task, original_request)
-        now = now_utc()
-        run = MeaRun(
-            id=uuid4().hex,
-            task_id=task.id,
-            conversation_id=conversation_id,
-            round_budget=round_budget,
-            requirements_revision=requirements.revision,
-            extra_tools=tuple(extra_tools),
-            auto_approve_sandbox=auto_approve_sandbox,
-            created_at=now,
-            updated_at=now,
-        )
-        await self._store.create_run(run, requirements)
-        if spawn:
-            self.spawn(run.id)
-        return run
+        async with self._start_lock:
+            task = await self._tasks.resolve(
+                task_id, owner_conversation_id=conversation_id,
+            )
+            if task is None:
+                raise MeaStartError(f"任务不存在：{task_id}")
+            if await self.busy_run(conversation_id) is not None:
+                raise MeaStartError("当前会话有正在执行的长任务，请先等待结束或取消")
+            if restart:
+                await self.preflight(task, original_request)
+                task = await self._tasks.restart(task.id)
+                task = await self._tasks.plan_accept(task.id)
+            if task.status is not TaskStatus.ACTIVE:
+                raise MeaStartError(f"只有进行中的任务可以启动长任务（当前 {task.status.value}）")
+            requirements = await self.preflight(task, original_request)
+            now = now_utc()
+            run = MeaRun(
+                id=uuid4().hex,
+                task_id=task.id,
+                conversation_id=conversation_id,
+                round_budget=round_budget,
+                requirements_revision=requirements.revision,
+                extra_tools=tuple(extra_tools),
+                auto_approve_sandbox=auto_approve_sandbox,
+                created_at=now,
+                updated_at=now,
+            )
+            await self._store.create_run(run, requirements)
+            if spawn:
+                self.spawn(run.id)
+            return run
 
     # 函数说明：MeaRunner.preflight
     # 用途：启动前检查（不看 Task 状态，方便调用方先检查、再接受计划）。
@@ -2095,23 +2106,15 @@ class MeaRunner:
 
     # ================================================================ 杂项
 
-    # 函数说明：MeaRunner._run_logged
-    # 用途：运行`logged`，供规划、执行、审计协作使用。
-    # 参数：
-    #   mea_id：长任务协作记录标识，类型 `str`。
-    # 返回：类型 `MeaRun`；按分支返回 `await self.run(mea_id)`；
-    # `await self._fail(mea, 'runner crashed; see logs')`。
-    # 关键调用（按源码出现顺序，实际执行取决于分支）：`self.run` → `logger.exception` →
-    # `self._store.require` → `self._fail`。
-    # 分支与异常：
-    #   捕获 `Exception` 后，返回 `await self._fail(mea, 'runner crashed; see logs')`。
     async def _run_logged(self, mea_id: str) -> MeaRun:
+        """Persist the exception reason; keep the full traceback in server logs."""
         try:
             return await self.run(mea_id)
-        except Exception:
+        except Exception as exc:
             logger.exception("mea loop crashed: %s", mea_id)
             mea = await self._store.require(mea_id)
-            return await self._fail(mea, "runner crashed; see logs")
+            reason = f"runner crashed: {type(exc).__name__}: {exc}"
+            return await self._fail(mea, reason)
 
     # 函数说明：MeaRunner._task
     # 用途：在规划、执行、审计协作中处理 `_task`，通过 `self._tasks.get` 完成首个内部处

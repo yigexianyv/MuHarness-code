@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -118,6 +119,34 @@ class FileTaskStore:
         )
         await self._write(task)
         return task
+
+    async def restart(self, task_id: str) -> Task:
+        """Create a fresh plan from current requirements, preserving the old task."""
+        async with self._lock_for(task_id):
+            source = await self._require(task_id)
+            now = datetime.now(UTC)
+            task = Task(
+                id=uuid4().hex,
+                title=source.title,
+                description=source.description,
+                goal=source.goal,
+                priority=source.priority,
+                constraints=source.constraints,
+                contract=source.contract,
+                steps=tuple(
+                    TaskStep(id=step.id, title=step.title, acceptance=step.acceptance)
+                    for step in source.steps
+                    if step.status is not TaskStepStatus.SUPERSEDED
+                ),
+                owner_conversation_id=source.owner_conversation_id,
+                run_ids=source.run_ids,
+                created_at=now,
+                updated_at=now,
+            )
+            if not task.steps:
+                raise ValueError("任务没有可重新执行的步骤")
+            await self._write(task)
+            return task
 
     # 函数说明：FileTaskStore.get
     # 用途：获取FileTaskStore，供任务状态与步骤管理使用。
@@ -829,7 +858,16 @@ def _write_task(path: Path, task: Task) -> None:
             file.write(payload)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary, path)
+        # Windows readers/scanners can briefly deny atomic replacement.
+        # Retry only replacement: never rerun the task or overwrite in place.
+        for attempt, delay in enumerate((0.05, 0.1, 0.2, 0)):
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as exc:
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 3:
+                    raise
+                time.sleep(delay)
     finally:
         if temporary.exists():
             temporary.unlink()

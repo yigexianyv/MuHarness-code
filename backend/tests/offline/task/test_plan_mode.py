@@ -579,7 +579,10 @@ async def test_plan_mode_replacement_cannot_advance_steps(
 
 
 @pytest.mark.parametrize("tool_name", ["task_get", "task_update"])
-async def test_plan_mode_does_not_claim_an_unsaved_update(tmp_path, tool_name) -> None:
+@pytest.mark.parametrize("completed", [False, True])
+async def test_plan_mode_does_not_claim_an_unsaved_update(
+    tmp_path, tool_name, completed,
+) -> None:
     tools, task_store, _ = await _build_tools(tmp_path)
     created = await task_store.create(
         title="初始计划", goal="目标",
@@ -587,7 +590,12 @@ async def test_plan_mode_does_not_claim_an_unsaved_update(tmp_path, tool_name) -
         owner_conversation_id="conv-1",
     )
     accepted = await task_store.plan_accept(created.id)
-    arguments = {"task_id": "current"}
+    if completed:
+        await task_store.set_step_status(
+            created.id, "s1", TaskStepStatus.DONE, note="此前已验收",
+        )
+        accepted = await task_store.set_status(created.id, TaskStatus.COMPLETED)
+    arguments = {"task_id": created.id}
     if tool_name == "task_update":
         arguments["status"] = "pending"
     registry, _ = _registry([
@@ -597,8 +605,17 @@ async def test_plan_mode_does_not_claim_an_unsaved_update(tmp_path, tool_name) -
     result = await _run(registry, tools, mode=AgentMode.PLAN, task_store=task_store)
     assert result.plan_task_id is None
     assert "应用状态：已更新" not in result.content
-    assert "Plan mode finished without" in result.content
+    if tool_name == "task_update":
+        assert not result.tool_calls[0].result.success
+        assert "计划未成功保存" in result.content
+        assert "本轮未保存新的执行计划" not in result.content
+    else:
+        assert result.tool_calls[0].result.success
+        assert "本轮未保存新的执行计划，也未重新执行任务" in result.content
+        assert "Plan mode finished without" not in result.content
+    assert result.messages[-1] == result.final_message
     assert await task_store.get(created.id) == accepted
+    assert len(await task_store.list()) == 1
 
 
 
@@ -655,7 +672,7 @@ async def test_plan_mode_blocks_side_effect_tools(tmp_path) -> None:
 # 分支与异常：
 #   验证条件：`result.ok is True`。
 #   验证条件：`result.plan_task_id is None`。
-#   验证条件：`'Plan mode finished without creating a task' in (result.content or '')`。
+#   验证条件：未保存计划时给出中性事实说明，保留模型回答。
 async def test_plan_mode_without_task_returns_clear_message(tmp_path) -> None:
     tools, task_store, _ = await _build_tools(tmp_path)
     registry, _ = _registry([_response(content="没有形成计划")])
@@ -665,7 +682,11 @@ async def test_plan_mode_without_task_returns_clear_message(tmp_path) -> None:
 
     assert result.ok is True
     assert result.plan_task_id is None
-    assert "Plan mode finished without creating a task" in (result.content or "")
+    assert result.content == (
+        "本轮未保存新的执行计划，也未重新执行任务。\n\n没有形成计划"
+    )
+    assert result.messages[-1] == result.final_message
+    assert not await task_store.list()
 
 
 

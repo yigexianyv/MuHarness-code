@@ -89,3 +89,11 @@ describe('long task (mea) web api', () => {
     expect(callMock).toHaveBeenLastCalledWith('mea.cancel', { mea_id: 'mea-1' })
   })
 })
+
+
+it('重做明确发送所选任务 ID 和 restart 标志', async () => {
+  await startMea('conv-2', 'selected-task', { restart: true })
+  expect(callMock).toHaveBeenLastCalledWith('mea.start', {
+    conversation_id: 'conv-2', task_id: 'selected-task', restart: true,
+  })
+})

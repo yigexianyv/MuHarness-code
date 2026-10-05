@@ -56,6 +56,7 @@ async def mea_start(params: dict[str, Any], ctx: RpcContext) -> dict[str, Any]:
     conversation_id = _require_str(params, "conversation_id")
     task_id = _require_str(params, "task_id")
     round_budget = _int(params, "round_budget", default=25, minimum=1, maximum=_MAX_ROUND_BUDGET)
+    restart = _bool(params, "restart", default=False)
     accept_plan = _bool(params, "accept_plan", default=True)
     auto_approve_sandbox = _bool(params, "auto_approve_sandbox", default=True)
     raw_tools = params.get("extra_tools", [])
@@ -80,7 +81,7 @@ async def mea_start(params: dict[str, Any], ctx: RpcContext) -> dict[str, Any]:
         original_request = await _original_request(application, task)
 
     try:
-        if task.status is TaskStatus.PENDING:
+        if task.status is TaskStatus.PENDING and not restart:
             if not accept_plan:
                 raise MeaStartError("计划还没有被接受")
             await runner.preflight(task, original_request)
@@ -92,11 +93,13 @@ async def mea_start(params: dict[str, Any], ctx: RpcContext) -> dict[str, Any]:
             round_budget=round_budget,
             extra_tools=extra_tools,
             auto_approve_sandbox=auto_approve_sandbox,
+            restart=restart,
         )
     except MeaStartError as exc:
         raise JsonRpcError(INVALID_STATE, str(exc)) from exc
     except ValueError as exc:  # plan_accept 的状态冲突
         raise JsonRpcError(INVALID_STATE, str(exc)) from exc
+    task = await application.task_store.get(mea.task_id)
     return {"mea": mea, "task": task}
 
 

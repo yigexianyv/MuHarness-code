@@ -1206,3 +1206,42 @@ def _write_task_payload(
     path = store.tasks_dir / f"{task_id}.json"
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33, None])
+@pytest.mark.parametrize("persistent", [False, True])
+async def test_atomic_replace_failures_preserve_task(
+    store: FileTaskStore, monkeypatch, winerror, persistent,
+) -> None:
+    from app.domain.task import store as task_store
+
+    task = await store.create(owner_conversation_id=_OWNER, title="original")
+    path = store.tasks_dir / f"{task.id}.json"
+    original = path.read_bytes()
+    replace = task_store.os.replace
+    calls = []
+    delays = []
+    error = PermissionError("task file is busy")
+    if winerror is not None:
+        error.winerror = winerror
+
+    def flaky_replace(source, target):
+        calls.append(target)
+        if persistent or len(calls) == 1:
+            raise error
+        replace(source, target)
+
+    monkeypatch.setattr(task_store.os, "replace", flaky_replace)
+    monkeypatch.setattr(task_store.time, "sleep", delays.append)
+    if persistent or winerror is None:
+        with pytest.raises(PermissionError) as caught:
+            await store._write(task.model_copy(update={"title": "updated"}))
+        assert caught.value is error
+        assert path.read_bytes() == original
+        assert len(calls) == (4 if winerror is not None else 1)
+    else:
+        await store._write(task.model_copy(update={"title": "updated"}))
+        assert (await store.get(task.id)).title == "updated"
+        assert len(calls) == 2
+    assert len(delays) == len(calls) - 1
+    assert not list(store.tasks_dir.glob("*.tmp"))

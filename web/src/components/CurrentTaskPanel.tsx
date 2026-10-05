@@ -46,11 +46,13 @@ export default function CurrentTaskPanel({
   busy = false,
   onExecute,
   onExecuteLong,
+  onRestart,
   lockedTaskIds = [],
 }: {
   tasks: Task[]
   busy?: boolean
   onExecute?: (task: Task) => void
+  onRestart?: (task: Task) => void
   /** 用长任务（逐轮执行 + 审计）继续这个任务。 */
   onExecuteLong?: (task: Task) => void
   /** 这些任务有未结束的长任务：不再提供普通执行入口。 */
@@ -64,7 +66,7 @@ export default function CurrentTaskPanel({
 
   return (
     <section className="current-task-panel" aria-label="当前会话任务">
-      <details>
+      <details open>
         <summary>
           <span className={`current-task-panel__icon current-task-panel__icon--${current.status}`}>
             <Icon name="runs" size={15} />
@@ -85,8 +87,10 @@ export default function CurrentTaskPanel({
         <div className="current-task-panel__body">
           {ordered.map((task) => {
             const taskProgress = progress(task)
+            const steps = task.steps.filter((step) => step.status !== 'superseded')
+            const missingAcceptance = steps.length === 0 || steps.some((step) => !step.acceptance?.trim())
             return (
-              <details key={task.id} className="current-task-item">
+              <details key={task.id} className="current-task-item" open={task.id === current.id}>
                 <summary>
                   <div><strong>{task.title}</strong><span>{STATUS_LABEL[task.status]}</span></div>
                   <span>{taskProgress.total > 0 ? `${taskProgress.done}/${taskProgress.total}` : '无步骤'}</span>
@@ -102,10 +106,11 @@ export default function CurrentTaskPanel({
                         <button
                           type="button"
                           className="btn btn-primary"
-                          disabled={busy}
+                          disabled={busy || missingAcceptance}
+                          title="直接执行所选任务的剩余步骤，已完成步骤保持不变。"
                           onClick={() => onExecute(task)}
                         >
-                          {busy ? '正在启动…' : '继续执行'}
+                          {busy ? '正在启动…' : '继续剩余阶段'}
                         </button>
                       ) : null}
                       {onExecuteLong ? (
@@ -119,6 +124,19 @@ export default function CurrentTaskPanel({
                           长任务执行
                         </button>
                       ) : null}
+                    </div>
+                  ) : null}
+                  {onRestart && task.status !== 'pending' ? (
+                    <div className="current-task-item__actions">
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy || lockedTaskIds.includes(task.id) || missingAcceptance}
+                        onClick={() => onRestart(task)}
+                      >
+                        从阶段 1 重新执行
+                      </button>
+                      <small>创建新任务并逐步执行，保留旧记录；可能覆盖工作区同名文件。</small>
                     </div>
                   ) : null}
                   {task.steps.length > 0 ? (
