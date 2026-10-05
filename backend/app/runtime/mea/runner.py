@@ -218,14 +218,17 @@ class SubRunResult:
     rejections: Counter[str] = field(default_factory=Counter)
     timed_out: bool = False
     model_finish_reason: str | None = None
+    unresolved_output_truncation: bool = False
 
     # 函数说明：SubRunResult.truncated
-    # 用途：返回 `self.model_finish_reason in {'max_tokens', 'length'}`，提供
+    # 用途：判断当前回复截断，或先前的审计报告截断仍未补全。
     # SubRunResult 的派生值。
     # 返回：类型 `bool`；返回 `self.model_finish_reason in {'max_tokens', 'length'}`。
     @property
     def truncated(self) -> bool:
-        return self.model_finish_reason in {"max_tokens", "length"}
+        return self.unresolved_output_truncation or self.model_finish_reason in {
+            "max_tokens", "length"
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -2015,6 +2018,7 @@ class MeaRunner:
             cancelled=cancelled or result.stop_reason is AgentStopReason.CANCELLED,
             stop_reason=result.stop_reason.value,
             model_finish_reason=result.model_finish_reason,
+            unresolved_output_truncation=result.unresolved_output_truncation,
             rejections=count_role_rejections(record.result for record in result.tool_calls),
         )
 

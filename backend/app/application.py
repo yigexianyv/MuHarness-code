@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Callable
@@ -94,6 +95,7 @@ from app.runtime.context import (
     ModelContextSummarizer,
     SQLiteConversationSummaryStore,
 )
+from app.runtime.instance_lock import DatabaseInstanceLock
 from app.runtime.mea import (
     ExecutorEvidenceProvider,
     MeaEvents,
@@ -477,6 +479,8 @@ class Application:
         self.reconciled_meas: tuple[Any, ...] = ()
 
         self._started = False
+        self._lifecycle_lock = asyncio.Lock()
+        self._instance_lock = DatabaseInstanceLock(self.database)
 
 
     # 函数说明：Application.start
@@ -494,11 +498,20 @@ class Application:
     # `self.summary_store`、`self.evidence_store`、`self.trace_store`、
     # `self.checkpoint_store`、`self.rule_store`、`self.policy_engine` 等 41 个字段。
     async def start(self) -> None:
-
         """按依赖顺序初始化存储、工具、MCP、调度器与运行服务，并开放应用能力。"""
-        if self._started:
-            return
+        async with self._lifecycle_lock:
+            if self._started:
+                return
+            # Own the database before cleanup or recovery touches live work.
+            self._instance_lock.acquire()
+            try:
+                await self._start()
+            except BaseException:
+                await self._close()
+                self._instance_lock.release()
+                raise
 
+    async def _start(self) -> None:
         database = self.database
         conversation_store = SQLiteConversationStore(database)
         await conversation_store.initialize()
@@ -889,7 +902,6 @@ class Application:
             conversation_service,
         )
         register_automation_tools(tool_registry, automation_scheduler)
-        await automation_scheduler.start()
 
         conversation_lifecycle = ConversationLifecycleService(
             conversation_store,
@@ -978,6 +990,7 @@ class Application:
         self.reconciled_meas = reconciled_meas
 
         self._started = True
+        await automation_scheduler.start()
 
     # 函数说明：Application.close
     # 用途：按逆向依赖顺序关闭后台任务、连接与持久化资源。
@@ -991,15 +1004,23 @@ class Application:
     # 副作用与资源：
     #   更新对象字段：`self.memory_embedding_adapter`、`self._started`。
     async def close(self) -> None:
-
         """按逆向依赖顺序关闭后台任务、连接与持久化资源。"""
+        async with self._lifecycle_lock:
+            await self._close()
+            self._instance_lock.release()
+
+    async def _close(self) -> None:
         if not self._started:
             return
         if self.mea_runner is not None:
             await self.mea_runner.shutdown()
-        await self.post_run_processor.close()
         if self.automation_scheduler is not None:
             await self.automation_scheduler.shutdown()
+        if self.run_manager is not None:
+            for run_id in self.run_manager.active_run_ids:
+                await self.run_manager.cancel(run_id)
+                await self.run_manager.wait(run_id)
+        await self.post_run_processor.close()
         if self.mcp_manager is not None and self.tool_registry is not None:
             await self.mcp_manager.close(self.tool_registry)
         if self.memory_manager is not None:

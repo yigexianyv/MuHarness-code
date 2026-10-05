@@ -65,6 +65,7 @@ class AgentResult(BaseModel):
     tool_result_views: tuple[ToolResultView, ...] = ()
     plan_task_id: str | None = None
     model_finish_reason: str | None = None
+    unresolved_output_truncation: bool = False
 
     # 函数说明：AgentResult.ok
     # 用途：返回 `self.stop_reason is AgentStopReason.FINAL_ANSWER`，提供 AgentResult 的

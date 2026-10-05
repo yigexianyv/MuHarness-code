@@ -2049,8 +2049,15 @@ async def test_markdown_no_blocker_can_complete(tmp_path):
 #   验证条件：`rounds[0].step_acceptance != 'satisfied'`。
 # 副作用与资源：
 #   更新对象字段：`env.runs.result`。
-@pytest.mark.parametrize("role", [AgentMode.MANAGE, AgentMode.AUDIT])
-async def test_truncated_role_cannot_commit_success(tmp_path, role):
+@pytest.mark.parametrize(
+    ("role", "truncation_field"),
+    [
+        (AgentMode.MANAGE, "model_finish_reason"),
+        (AgentMode.AUDIT, "model_finish_reason"),
+        (AgentMode.AUDIT, "unresolved_output_truncation"),
+    ],
+)
+async def test_truncated_role_cannot_commit_success(tmp_path, role, truncation_field):
     script = Script(
         manager=[manager(execute("s1"))] * 3,
         executor=["done"] * 3,
@@ -2076,7 +2083,12 @@ async def test_truncated_role_cannot_commit_success(tmp_path, role):
         result = original(run_id)
         mode = next(mode for mode, rid in env.runs.started if rid == run_id)
         if mode is role and result is not None:
-            return result.model_copy(update={"model_finish_reason": "max_tokens"})
+            update = (
+                {"model_finish_reason": "end_turn", truncation_field: True}
+                if truncation_field == "unresolved_output_truncation"
+                else {truncation_field: "max_tokens"}
+            )
+            return result.model_copy(update=update)
         return result
 
     env.runs.result = truncated_result
@@ -2090,6 +2102,7 @@ async def test_truncated_role_cannot_commit_success(tmp_path, role):
         assert env.runs.executor_starts() == 0
     else:
         rounds = await env.store.rounds(mea_id)
+        assert rounds[0].audit_output_truncated is True
         assert rounds[0].step_acceptance != "satisfied"
         assert "截断" in rounds[0].auditor_report
 

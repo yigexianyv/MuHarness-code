@@ -36,10 +36,19 @@ def _runtime(registry, tools=None, **kwargs) -> AgentRuntime:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("retry_content", "retry_finish", "expected_ok", "unresolved"),
+    [
+        (None, "max_tokens", False, True),
+        (None, "end_turn", False, True),
+        ("full report", "end_turn", True, False),
+        ("partial report", "max_tokens", True, True),
+    ],
+)
 async def test_empty_reply_during_forced_finalization_keeps_truncation(
-    tmp_path,
+    tmp_path, retry_content, retry_finish, expected_ok, unresolved,
 ) -> None:
-    # 审计报告被截断 → 强制收尾重写报告 → 模型又被截断、返回空内容（实测 S9 的路径）
+    # 结束原因与“报告是否补全”独立；空 end_turn 不能清除尚未补全的截断。
     (tmp_path / "proof.txt").write_text("verified evidence", encoding="utf-8")
     registry, adapter = fake_registry(
         [
@@ -53,7 +62,9 @@ async def test_empty_reply_during_forced_finalization_keeps_truncation(
             model_response(content="状态: complete\npartial").model_copy(
                 update={"finish_reason": "max_tokens"}
             ),
-            _truncated_empty(),
+            model_response(content=retry_content).model_copy(
+                update={"finish_reason": retry_finish}
+            ),
         ]
     )
     capabilities = ModelCapabilityRegistry()
@@ -72,18 +83,21 @@ async def test_empty_reply_during_forced_finalization_keeps_truncation(
     ).run("audit", mode=AgentMode.AUDIT)
 
     assert len(adapter.requests) == 3
-    assert result.ok is False
-    assert result.stop_reason is AgentStopReason.MODEL_ERROR
-    assert "forced finalization" in str(result.error)
-    assert result.model_finish_reason == "max_tokens"
+    assert result.ok is expected_ok
+    if not expected_ok:
+        assert result.stop_reason is AgentStopReason.MODEL_ERROR
+        assert "forced finalization" in str(result.error)
+    assert result.model_finish_reason == retry_finish
+    assert result.unresolved_output_truncation is unresolved
     sub = SubRunResult(
         "r",
         "",
         ok=result.ok,
         cancelled=False,
         model_finish_reason=result.model_finish_reason,
+        unresolved_output_truncation=result.unresolved_output_truncation,
     )
-    assert sub.truncated is True  # 长任务据此计入"审计输出截断"
+    assert sub.truncated is unresolved
 
 
 @pytest.mark.asyncio
@@ -110,3 +124,4 @@ async def test_model_error_does_not_reuse_previous_finish_reason() -> None:
     result = await _runtime(registry, tools).run("work")
     assert result.ok is False
     assert result.model_finish_reason is None
+    assert result.unresolved_output_truncation is False
