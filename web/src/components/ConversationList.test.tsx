@@ -88,9 +88,9 @@ describe('ConversationList', () => {
     expect(html).not.toContain('>已完成</span>')
   })
 
-  it('从旧存储键恢复置顶，并迁移到 MuHarness 存储键', () => {
+  it('仅从 MuHarness 存储键恢复置顶', () => {
     const getItem = vi.fn((key: string) =>
-      key === 'vesta.pinnedConversations' ? '["pinned"]' : null,
+      key === 'muharness.pinnedConversations' ? '["pinned"]' : null,
     )
     const setItem = vi.fn()
     vi.stubGlobal('localStorage', { getItem, setItem })
@@ -109,7 +109,7 @@ describe('ConversationList', () => {
 
     expect(html.indexOf('置顶对话')).toBeLessThan(html.indexOf('普通对话'))
     expect(getItem).toHaveBeenCalledWith('muharness.pinnedConversations')
-    expect(getItem).toHaveBeenCalledWith('vesta.pinnedConversations')
-    expect(setItem).toHaveBeenCalledWith('muharness.pinnedConversations', '["pinned"]')
+    expect(getItem).toHaveBeenCalledTimes(1)
+    expect(setItem).not.toHaveBeenCalled()
   })
 })

@@ -45,7 +45,8 @@ class ModelSettings(BaseSettings):
     model_default_provider: ModelProvider = ModelProvider.OPENAI
     model_timeout_seconds: float = Field(default=120.0, gt=0)
     model_max_retries: int = Field(default=2, ge=0)
-    model_default_max_output_tokens: int = Field(default=4096, gt=0)
+    # 4096 容易被推理模型的思考内容耗尽，默认给 8k；截断时 loop 会翻倍重试。
+    model_default_max_output_tokens: int = Field(default=8192, gt=0)
 
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-5.4-mini"

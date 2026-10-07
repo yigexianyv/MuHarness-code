@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -44,6 +44,12 @@ class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any] | str = Field(default_factory=dict)
+
+
+# 运行时动态提醒（预算预警、收口、响应修正等）的消息名。
+# 这类 system 消息只出现在请求末尾，适配器应原位发送，不得并入顶部 system，
+# 否则会改动缓存前缀，导致整段 prompt 缓存失效。
+RUNTIME_NOTICE_NAME = "muharness_runtime_notice"
 
 
 class Message(BaseModel):
@@ -101,6 +107,10 @@ class ToolResult(BaseModel):
     output_sha256: str | None = None
     output_truncated: bool | None = None
     evidence_error: str | None = None
+    # 失败发生在调用前，还是调用已经开始但无法确认最终效果。
+    # 旧记录和成功结果可省略这些字段，不能从 success=False 推断没有副作用。
+    execution_outcome: Literal["not_started", "unknown"] | None = None
+    retry_advice: str | None = None
 
 
 class ModelRequest(BaseModel):

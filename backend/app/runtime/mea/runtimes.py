@@ -40,6 +40,11 @@ class MeaSettings(BaseSettings):
     role_max_output_tokens: int = Field(default=32_768, ge=1024)  # Executor / Auditor 单次输出
     manager_max_output_tokens: int = Field(default=16_384, ge=1024)  # Manager / 最终回复 / 格式修复
     finalization_max_output_tokens: int = Field(default=8_192, ge=1024)  # 步数用完、被迫收尾时的那次输出
+    # Executor 自己的 token 阈值，不沿用主对话的 80k/120k/160k（那是按聊天一轮回答设计的）。
+    # Executor 主要靠 30 分钟时限和 40 次模型调用约束；token 线只防失控，正常写代码不该碰到。
+    executor_warning_tokens: int = Field(default=300_000, ge=1)
+    executor_finalization_tokens: int = Field(default=400_000, ge=1)
+    executor_hard_tokens: int = Field(default=500_000, ge=1)
 
 
 ROLE_SYSTEM_PROMPT = (
@@ -66,16 +71,20 @@ class RoleLimits:
     max_output_tokens: int | None = None
     # 收尾那次输出通常就是角色的交付报告，不能沿用聊天的 1200
     finalization_max_output_tokens: int = 8_192
+    # 角色自己的 token 阈值；为 None 时沿用主运行预算的对应阈值。
+    warning_tokens: int | None = None
+    finalization_tokens: int | None = None
+    hard_tokens: int | None = None
 
     # 函数说明：RoleLimits.budget
-    # 用途：在主运行预算的 token 阈值上替换模型调用次数阈值。
+    # 用途：在主运行预算上替换模型调用次数阈值，以及角色单独设置的 token 阈值。
     # 参数：
     #   base：`base`输入或配置值，类型 `RunBudgetConfig | None`。
     # 返回：类型 `RunBudgetConfig`；返回 `RunBudgetConfig(**values)`。
     # 关键调用（按源码出现顺序，实际执行取决于分支）：`RunBudgetConfig` →
     # `values.update`。
     def budget(self, base: RunBudgetConfig | None) -> RunBudgetConfig:
-        """在主运行预算的 token 阈值上替换模型调用次数阈值。"""
+        """在主运行预算上替换模型调用次数阈值，以及角色单独设置的 token 阈值。"""
 
         values = (base or RunBudgetConfig()).model_dump()
         values.update(
@@ -84,6 +93,10 @@ class RoleLimits:
             warning_model_calls=self.warning_model_calls,
             finalization_max_output_tokens=self.finalization_max_output_tokens,
         )
+        for name in ("warning_tokens", "finalization_tokens", "hard_tokens"):
+            value = getattr(self, name)
+            if value is not None:
+                values[name] = value
         return RunBudgetConfig(**values)
 
 
@@ -91,8 +104,9 @@ DEFAULT_ROLE_LIMITS: Mapping[AgentMode, RoleLimits] = {
     # Manager 没有工具，一次模型调用就结束；留一次余量给空回复重试
     AgentMode.MANAGE: RoleLimits(max_steps=2, max_tool_rounds=None, hard_model_calls=2,
                                  timeout_seconds=600),
-    AgentMode.EXECUTE: RoleLimits(max_steps=40, max_tool_rounds=40, hard_model_calls=40,
-                                  finalization_model_calls=36, warning_model_calls=30,
+    # Executor 主要靠 30 分钟时限约束；调用次数线放宽到 60/70/80，避免正常写代码就碰到收口。
+    AgentMode.EXECUTE: RoleLimits(max_steps=80, max_tool_rounds=80, hard_model_calls=80,
+                                  finalization_model_calls=70, warning_model_calls=60,
                                   timeout_seconds=30 * 60),
     AgentMode.AUDIT: RoleLimits(max_steps=20, max_tool_rounds=20, hard_model_calls=20,
                                 finalization_model_calls=18, warning_model_calls=15,
@@ -145,6 +159,13 @@ def role_limits(
             max_output_tokens=output,
             finalization_max_output_tokens=min(cap(finalization), output),
         )
+        if mode is AgentMode.EXECUTE:
+            limits[mode] = replace(
+                limits[mode],
+                warning_tokens=settings.executor_warning_tokens,
+                finalization_tokens=settings.executor_finalization_tokens,
+                hard_tokens=settings.executor_hard_tokens,
+            )
     return limits
 
 

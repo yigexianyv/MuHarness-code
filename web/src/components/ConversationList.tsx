@@ -3,21 +3,14 @@ import type { Conversation } from '../api/types'
 import { Icon } from './Icon'
 
 const PINNED_KEY = 'muharness.pinnedConversations'
-const LEGACY_PINNED_KEY = 'vesta.pinnedConversations'
 
 function loadPinned(): string[] {
   try {
-    const current = localStorage.getItem(PINNED_KEY)
-    const raw = current ?? localStorage.getItem(LEGACY_PINNED_KEY)
+    const raw = localStorage.getItem(PINNED_KEY)
     const parsed = raw ? JSON.parse(raw) : []
     const pinned = Array.isArray(parsed)
       ? parsed.filter((x): x is string => typeof x === 'string')
       : []
-    if (current === null && raw !== null) {
-      try {
-        localStorage.setItem(PINNED_KEY, JSON.stringify(pinned))
-      } catch {}
-    }
     return pinned
   } catch {
     return []

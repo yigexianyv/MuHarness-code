@@ -32,6 +32,7 @@ from app.models.adapter import ModelAdapter
 from app.models.config import ModelSettings, ProviderConfig
 from app.models.registry import ModelAdapterRegistry
 from app.models.types import (
+    RUNTIME_NOTICE_NAME,
     ApiStyle,
     Message,
     MessageRole,
@@ -177,6 +178,58 @@ class FixedContextSummarizer(ContextSummarizer):
             summary=RollingConversationSummary(current_objective="保留当前目标"),
             usage=ModelUsage(input_tokens=7, output_tokens=3, total_tokens=10),
         )
+
+
+# 把请求按 Anthropic 适配器转换后渲染成线性文本，用于断言缓存前缀未被改动：
+# 顶部 system 与工具 schema 不变，且上一次请求的渲染文本是这一次的前缀。
+# 模拟 DeepSeek 思考模式的规则：含 text 块的 user 轮算“新用户消息”，只有最后一条
+# 新用户消息之后的助手轮（工具循环内）才保留思考；所以末尾新增 text 块会改变前面
+# 助手轮的渲染，前缀断言失败。tool_result 不写结尾标记，在其末尾追加内容不算改动。
+def _anthropic_prefix_kept(previous: ModelRequest, current: ModelRequest) -> bool:
+    from app.models.providers.anthropic import _anthropic_messages
+
+    def render(request: ModelRequest) -> tuple[str | None, str]:
+        system, turns = _anthropic_messages(request.messages)
+        normalized = []
+        for turn in turns:
+            content = turn["content"]
+            items = (
+                content if isinstance(content, list)
+                else [{"type": "text", "text": content}]
+            )
+            normalized.append((turn["role"], items))
+        last_message = max(
+            (
+                index
+                for index, (role, items) in enumerate(normalized)
+                if role == "user" and any(i["type"] == "text" for i in items)
+            ),
+            default=-1,
+        )
+        parts: list[str] = []
+        for index, (role, items) in enumerate(normalized):
+            kind = role
+            if role == "assistant":
+                kind = "assistant:loop" if index > last_message else "assistant:done"
+            parts.append(f"<turn {kind}>")
+            for item in items:
+                if item["type"] == "tool_result":
+                    parts.append(f"<tool_result {item['tool_use_id']}>")
+                    parts.append(str(item["content"]))
+                elif item["type"] == "text":
+                    parts.append("<text>")
+                    parts.append(item["text"])
+                else:
+                    parts.append(json.dumps(item, sort_keys=True))
+        return system, "".join(parts)
+
+    system_before, text_before = render(previous)
+    system_after, text_after = render(current)
+    return (
+        system_before == system_after
+        and previous.tools == current.tools
+        and text_after.startswith(text_before)
+    )
 
 
 class CountingTool(BaseTool):
@@ -3666,11 +3719,55 @@ async def test_truncated_empty_retry_stays_bounded() -> None:
     empty = model_response(content=None).model_copy(
         update={"finish_reason": "max_tokens"}
     )
-    registry, adapter = fake_registry([empty, empty])
+    registry, adapter = fake_registry([empty, empty, empty])
     result = await AgentRuntime(registry, ToolRegistry(), provider="fake").run("work")
     assert not result.ok
-    assert len(adapter.requests) == 2
-    assert [r.max_output_tokens for r in adapter.requests] == [4096, 4096]
+    # 截断空回复最多恢复 2 次（共 3 次请求），之后报错，不会无限重试
+    assert len(adapter.requests) == 3
+    assert [r.max_output_tokens for r in adapter.requests] == [4096, 4096, 4096]
+    assert result.error is not None
+    assert "truncated by the output limit 3 times" in result.error.message
+    for request in adapter.requests[1:]:
+        assert request.messages[-1].name == RUNTIME_NOTICE_NAME
+        assert "输出上限截断" in (request.messages[-1].content or "")
+
+
+# 贴近真实执行者：角色显式指定了输出上限（不扩容），思考连续两次写满上限，
+# 第三次在“缩小动作、立即调用工具”的提示下成功。
+@pytest.mark.asyncio
+async def test_truncated_empty_recovers_with_explicit_limit() -> None:
+    empty = model_response(content=None).model_copy(
+        update={"finish_reason": "max_tokens"}
+    )
+    registry, adapter = fake_registry(
+        [
+            empty,
+            empty,
+            model_response(
+                tool_calls=(ToolCall(id="c1", name="count", arguments={"value": 1}),)
+            ),
+            model_response(content="done"),
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(CountingTool())
+    result = await AgentRuntime(
+        registry,
+        tools,
+        provider="fake",
+        max_output_tokens=2048,
+    ).run("work")
+    assert result.ok
+    assert result.content == "done"
+    assert [r.max_output_tokens for r in adapter.requests] == [2048] * 4
+    notices = [
+        m for m in adapter.requests[2].messages if m.name == RUNTIME_NOTICE_NAME
+    ]
+    # 两次截断的提示都保留在已发送前缀里，提示内容要求立即调用工具
+    assert len(notices) == 2
+    assert all("立即执行" in (m.content or "") for m in notices)
+    assert _anthropic_prefix_kept(adapter.requests[0], adapter.requests[1])
+    assert _anthropic_prefix_kept(adapter.requests[1], adapter.requests[2])
 
 
 # 函数说明：test_truncated_retry_budget_resets_after_tool_response
@@ -3800,3 +3897,158 @@ async def test_audit_report_recovery_keeps_evidence_without_tools(
     assert any("verified evidence" in (m.content or "") for m in recovery.messages)
     assert not any("partial" in (m.content or "") for m in recovery.messages)
     assert result.model_finish_reason == retry_finish
+
+
+# 回归：截断空回复 → 正常工具调用 → 再次截断空回复，不应被累计为“两次空回复”。
+# 对应 run dab8eb0e…：第 4 步与第 6 步之间隔着成功的第 5 步，却被判定失败。
+@pytest.mark.asyncio
+async def test_empty_retry_counter_resets_after_tool_round() -> None:
+    empty = model_response(content=None).model_copy(
+        update={"finish_reason": "max_tokens"}
+    )
+    registry, adapter = fake_registry(
+        [
+            empty,
+            model_response(
+                tool_calls=(ToolCall(id="count", name="count", arguments={"value": 1}),)
+            ),
+            empty,
+            model_response(content="done"),
+        ]
+    )
+    capabilities = ModelCapabilityRegistry()
+    capabilities.register_override("fake", "fake-model", max_output_tokens=16384)
+    tools = ToolRegistry()
+    tools.register(CountingTool())
+    result = await AgentRuntime(
+        registry,
+        tools,
+        provider="fake",
+        context_manager=ContextManager(registry=capabilities),
+    ).run("work")
+    assert result.ok
+    assert result.content == "done"
+    assert [r.max_output_tokens for r in adapter.requests] == [4096, 8192, 4096, 8192]
+    # 响应修正提醒追加在末尾，不改动已发送前缀
+    assert _anthropic_prefix_kept(adapter.requests[0], adapter.requests[1])
+    assert _anthropic_prefix_kept(adapter.requests[2], adapter.requests[3])
+
+
+# 回归：预算预警只追加在请求末尾，不改动已发送的前缀（否则整段缓存失效，
+# 一次重算即可冲破硬上限，见 run 4aa87bff / c51a4e87）。
+@pytest.mark.asyncio
+async def test_budget_warning_appends_at_tail_and_keeps_prefix() -> None:
+    def usage(uncached: int) -> ModelUsage:
+        return ModelUsage(
+            input_tokens=100,
+            output_tokens=1,
+            total_tokens=101,
+            cached_input_tokens=100 - uncached,
+            uncached_input_tokens=uncached,
+        )
+
+    registry, adapter = fake_registry(
+        [
+            model_response(
+                tool_calls=(ToolCall(id="c1", name="count", arguments={"value": 1}),),
+                usage=usage(1),
+            ),
+            model_response(
+                tool_calls=(ToolCall(id="c2", name="count", arguments={"value": 2}),),
+                usage=usage(10),
+            ),
+            model_response(
+                tool_calls=(ToolCall(id="c3", name="count", arguments={"value": 3}),)
+            ),
+            model_response(content="done"),
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(CountingTool())
+    result = await AgentRuntime(
+        registry,
+        tools,
+        provider="fake",
+        run_budget_config=RunBudgetConfig(
+            _env_file=None,
+            warning_tokens=5,
+            finalization_tokens=1_000,
+            hard_tokens=2_000,
+            warning_model_calls=100,
+            finalization_model_calls=101,
+            hard_model_calls=102,
+        ),
+    ).run("计数")
+
+    assert result.ok is True
+    first, second, third, fourth = adapter.requests
+    assert all(m.name != RUNTIME_NOTICE_NAME for m in second.messages)
+    # 预警出现的那一步：已发送前缀不变，预警在最末尾
+    assert third.messages[: len(second.messages)] == second.messages
+    assert third.messages[-1].name == RUNTIME_NOTICE_NAME
+    assert "预算预警" in (third.messages[-1].content or "")
+    # 之后一步：继续沿用已发送前缀，预警不重复追加
+    assert fourth.messages[: len(third.messages)] == third.messages
+    assert sum(m.name == RUNTIME_NOTICE_NAME for m in fourth.messages) == 1
+    assert first.tools == second.tools == third.tools == fourth.tools
+    # 按适配器转换后同样保持前缀（含“新用户消息会丢思考”的规则）
+    assert _anthropic_prefix_kept(first, second)
+    assert _anthropic_prefix_kept(second, third)
+    assert _anthropic_prefix_kept(third, fourth)
+
+
+# 工具调用写到一半被输出上限截断（实测 write_file 只剩 path、缺 content）：
+# 不执行半截调用，丢弃这条回复，按截断恢复；下一次完整调用才真正执行。
+@pytest.mark.asyncio
+async def test_truncated_tool_call_is_not_executed_and_recovers() -> None:
+    truncated_call = model_response(
+        tool_calls=(ToolCall(id="c1", name="count", arguments={"value": 1}),)
+    ).model_copy(update={"finish_reason": "max_tokens"})
+    registry, adapter = fake_registry(
+        [
+            truncated_call,
+            model_response(
+                tool_calls=(ToolCall(id="c2", name="count", arguments={"value": 2}),)
+            ),
+            model_response(content="done"),
+        ]
+    )
+    tool = CountingTool()
+    tools = ToolRegistry()
+    tools.register(tool)
+    result = await AgentRuntime(
+        registry, tools, provider="fake", max_output_tokens=2048
+    ).run("work")
+
+    assert result.ok
+    assert result.content == "done"
+    assert tool.executions == 1  # 只执行了完整的那次调用
+    retry = adapter.requests[1]
+    assert retry.messages[-1].name == RUNTIME_NOTICE_NAME
+    assert "调用参数不完整" in (retry.messages[-1].content or "")
+    # 被丢弃的半截调用不进入后续请求
+    assert all(
+        call.id != "c1"
+        for message in adapter.requests[2].messages
+        for call in message.tool_calls
+    )
+    assert _anthropic_prefix_kept(adapter.requests[0], adapter.requests[1])
+
+
+@pytest.mark.asyncio
+async def test_repeated_truncated_tool_calls_stop_with_clear_error() -> None:
+    truncated_call = model_response(
+        tool_calls=(ToolCall(id="c1", name="count", arguments={"value": 1}),)
+    ).model_copy(update={"finish_reason": "max_tokens"})
+    registry, adapter = fake_registry([truncated_call] * 3)
+    tool = CountingTool()
+    tools = ToolRegistry()
+    tools.register(tool)
+    result = await AgentRuntime(registry, tools, provider="fake").run("work")
+
+    assert not result.ok
+    assert tool.executions == 0
+    assert len(adapter.requests) == 3
+    assert result.error is not None
+    assert "without complete tool calls" in result.error.message
+    assert result.model_finish_reason == "max_tokens"

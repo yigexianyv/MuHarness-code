@@ -43,7 +43,7 @@ async def _docker_query(*args: str) -> tuple[int, str]:
 async def docker_preflight() -> dict[str, Any]:
     image = os.environ.get(
         "MUHARNESS_SANDBOX_IMAGE",
-        os.environ.get("VESTA_SANDBOX_IMAGE", "muharness-sandbox:latest"),
+        "muharness-sandbox:latest",
     )
     result: dict[str, Any] = {"available": False, "image": image}
     if not shutil.which("docker"):

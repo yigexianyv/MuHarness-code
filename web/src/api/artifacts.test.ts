@@ -36,7 +36,6 @@ describe('artifact api', () => {
     expect(url).toBe(`${SERVER_URL}/artifacts/${id}/content`)
     expect(url).not.toContain('/Users/')
     expect(url).not.toContain('.muharness')
-    expect(url).not.toContain('.vesta')
     expect(url).not.toContain('file://')
   })
 })

@@ -221,6 +221,9 @@ export interface AgentEvent {
     evidence_id?: string | null
     /** 输出过长，模型收到的是截短版本 */
     output_truncated?: boolean | null
+    /** 失败发生在执行前，或执行已开始但最终效果未知 */
+    execution_outcome?: 'not_started' | 'unknown' | null
+    retry_advice?: string | null
   } | null
   usage: ModelUsage | null
   stop_reason: string | null

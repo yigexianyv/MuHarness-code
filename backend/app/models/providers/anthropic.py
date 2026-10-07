@@ -11,6 +11,7 @@ from ..adapter import ModelAdapter
 from ..config import ProviderConfig
 from ..errors import ModelAdapterError, UnsupportedMessageError
 from ..types import (
+    RUNTIME_NOTICE_NAME,
     Message,
     MessageRole,
     ModelRequest,
@@ -179,6 +180,13 @@ def _anthropic_messages(
 
     for message in messages:
         if message.role is MessageRole.SYSTEM:
+            if message.name == RUNTIME_NOTICE_NAME:
+                # 运行时提醒原位发送（并入当前 user 轮），不改顶部 system，保住缓存前缀。
+                if message.content:
+                    _append_runtime_notice(
+                        result, pending_tool_results, message.content
+                    )
+                continue
             if message.content:
                 system_parts.append(message.content)
             continue
@@ -379,3 +387,37 @@ def _model_dump(value: Any) -> dict[str, Any] | None:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     return value if isinstance(value, dict) else None
+
+
+# 标明来源，避免模型把运行时提醒当成用户本人说的话。
+RUNTIME_NOTICE_SOURCE = "[来源：MuHarness 应用的运行时提醒，非用户输入]"
+
+
+def _append_runtime_notice(
+    result: list[dict[str, Any]],
+    pending_tool_results: list[dict[str, Any]],
+    content: str,
+) -> None:
+    text = (
+        f"<system-reminder>\n{RUNTIME_NOTICE_SOURCE}\n"
+        f"{content}\n</system-reminder>"
+    )
+    # 工具循环中：并进最后一个 tool_result 的内容末尾，不新增 text 块。
+    # DeepSeek 等供应商把含 text 块的 user 轮视为“新用户消息”，会丢弃此前拼接的
+    # 思考内容，导致前文重新渲染、缓存整体失效（实测命中率跌到 17%）。
+    if pending_tool_results:
+        last = pending_tool_results[-1]
+        previous = last.get("content") or ""
+        if isinstance(previous, str):
+            last["content"] = f"{previous}\n\n{text}" if previous else text
+        else:
+            last["content"] = [*previous, {"type": "text", "text": text}]
+        return
+    block = {"type": "text", "text": text}
+    if result and result[-1]["role"] == "user":
+        previous = result[-1]["content"]
+        if isinstance(previous, str):
+            previous = [{"type": "text", "text": previous}] if previous else []
+        result[-1]["content"] = [*previous, block]
+        return
+    result.append({"role": "user", "content": [block]})

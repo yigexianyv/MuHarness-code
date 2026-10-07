@@ -6,6 +6,7 @@ from app.safety.sandbox import SandboxSupervisor
 from ..registry import ToolRegistry
 from ..search import SearchSettings
 from .current_time import CurrentTimeTool
+from .edit_file import EditFileTool
 from .http_request import HttpRequestTool
 from .list_files import ListFilesTool
 from .read_file import ReadFileTool
@@ -38,6 +39,7 @@ def build_builtin_tool_registry(
     registry.register(ListFilesTool(workspace_root))
     registry.register(ReadFileTool(workspace_root))
     registry.register(WriteFileTool(workspace_root))
+    registry.register(EditFileTool(workspace_root))
     registry.register(
         ShellCommandTool(
             workspace_root,
@@ -50,6 +52,7 @@ def build_builtin_tool_registry(
 
 __all__ = [
     "CurrentTimeTool",
+    "EditFileTool",
     "HttpRequestTool",
     "ListFilesTool",
     "ReadFileTool",

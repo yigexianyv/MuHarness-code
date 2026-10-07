@@ -409,9 +409,7 @@ async def test_shell_timeout_runs_backend_cleanup(tmp_path: Path) -> None:
 #   文件或资源访问：`workspace.mkdir`、`(workspace / '.env').write_text`、
 # `(workspace / 'result.txt').read_text`。
 @pytest.mark.skipif(
-    os.environ.get(
-        "MUHARNESS_RUN_DOCKER_E2E", os.environ.get("VESTA_RUN_DOCKER_E2E")
-    ) != "1",
+    os.environ.get("MUHARNESS_RUN_DOCKER_E2E") != "1",
     reason="需要显式启用真实 Docker 集成测试",
 )
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from app.domain.task.context import TaskContextProvider
 from app.domain.task.models import TaskStatus
 from app.models.registry import ModelAdapterRegistry
 from app.models.types import (
+    RUNTIME_NOTICE_NAME,
     AgentMode,
     Message,
     MessageRole,
@@ -112,7 +113,7 @@ _PLAN_MODE_SYSTEM_MESSAGE = (
     "实际实施需使用执行入口，暂停任务须先恢复。"
 )
 
-_EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS = 8192
+_EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS = 16384
 
 _PLAN_NO_TASK_MESSAGE = "本轮未保存新的执行计划，也未重新执行任务。"
 _PLAN_SAVE_FAILED_MESSAGE = "本轮计划未成功保存，请查看工具返回的失败原因。"
@@ -145,6 +146,25 @@ _EMPTY_FINAL_RETRY_MESSAGE = (
     "尚有必要工作且当前模式允许时，发起所需工具调用；已完成或无法继续时，"
     "依据证据直接答复并说明缺口。不要重复分析或仅输出内部思考。"
 )
+# 思考被单次输出上限截断、既无文本也无工具调用时的恢复提示。被截断的思考不会回传给模型，
+# 只说“接着写”会让模型重新推理一遍、再次写满上限；所以要求缩小动作、立即调用工具。
+_TRUNCATED_EMPTY_RETRY_MESSAGE = (
+    "响应修正：上一条响应的思考被单次输出上限截断，没有产生任何文本或工具调用，"
+    "那段思考已经丢失。不要在思考里起草完整文件、完整代码或完整方案；"
+    "把当前动作缩小到一个可以立即执行的步骤，在本次响应中直接发起工具调用。"
+    "需要写较大的文件时分多次完成：先写入一个可运行的部分，再在后续调用中补全"
+    "（可拆成多个文件，或在可用时用 shell 追加）。"
+)
+# 工具调用写到一半被单次输出上限截断：参数可能不完整（如 write_file 只有 path），
+# 执行只会得到误导性的参数错误，所以丢弃不执行，按截断恢复。
+_TRUNCATED_TOOL_CALL_RETRY_MESSAGE = (
+    "响应修正：上一条响应在生成工具调用时被单次输出上限截断，调用参数不完整，"
+    "已丢弃、没有执行（例如 write_file 缺少 content）。不要在思考里起草完整文件、"
+    "完整代码或完整方案；在本次响应中直接发起工具调用。需要写较大的文件时分多次完成："
+    "先写入一个可运行的部分，再在后续调用中补全（可拆成多个文件，或在可用时用 shell 追加）。"
+)
+# 截断导致的空回复或半截工具调用，最多再恢复几次（不含首次请求，两种情况共用计数）。
+_TRUNCATED_EMPTY_RETRY_LIMIT = 2
 _TEXTUAL_TOOL_CALL_RETRY_MESSAGE = (
     "响应修正：普通文本里的调用协议不会被执行。需要工具时使用 Provider 的"
     "结构化 tool_calls，并遵守当前模式和工具权限；无需工具时输出完整的用户答复。"
@@ -343,6 +363,7 @@ class AgentLoop:
         audit_report_recovery = False
         audit_report_recovery_used = False
         empty_final_retry_used = False
+        truncated_empty_retries = 0
         retry_max_output_tokens: int | None = None
         textual_tool_call_retry_used = False
         response_repair_message: Message | None = None
@@ -527,6 +548,8 @@ class AgentLoop:
             )
             request_messages = source_messages
             if closing_can_deliver:
+                # 收口阶段只发送交付工具。曾尝试保留完整 schema 以复用缓存，但模型会照常
+                # 用 shell 改文件，被执行层拒绝后整轮修改丢失，得不偿失。
                 request_tools = self._tool_registry.closing_definitions_for_mode(
                     mode,
                     activated_names=activated_tools,
@@ -563,6 +586,17 @@ class AgentLoop:
                     step=step,
                 )
 
+            # 预警属于动态提醒：只追加在请求末尾，不插进上下文中段。
+            # 插在中段会让其后整段 prompt 缓存失效，一次重算约等于整段输入。
+            budget_warning_message = (
+                Message(
+                    role=MessageRole.SYSTEM,
+                    name=RUNTIME_NOTICE_NAME,
+                    content=_RUN_BUDGET_WARNING_MESSAGE,
+                )
+                if budget_warning_in_request
+                else None
+            )
             try:
                 trailing_system_messages: list[Message] = []
                 if mode is AgentMode.PLAN:
@@ -571,13 +605,6 @@ class AgentLoop:
                             role=MessageRole.SYSTEM,
                             name="muharness_plan_mode",
                             content=_PLAN_MODE_SYSTEM_MESSAGE,
-                        )
-                    )
-                if budget_warning_in_request:
-                    trailing_system_messages.append(
-                        Message(
-                            role=MessageRole.SYSTEM,
-                            content=_RUN_BUDGET_WARNING_MESSAGE,
                         )
                     )
                 context_injection = await context_session.build(
@@ -598,11 +625,14 @@ class AgentLoop:
                         *context_messages,
                         *request_messages[request_historical_message_count:],
                     )
+                if budget_warning_message is not None:
+                    request_messages = (*request_messages, budget_warning_message)
                 if closing_can_deliver:
                     request_messages = (
                         *request_messages,
                         Message(
                             role=MessageRole.SYSTEM,
+                            name=RUNTIME_NOTICE_NAME,
                             content=_RUN_BUDGET_CLOSING_MESSAGE,
                         ),
                     )
@@ -618,6 +648,7 @@ class AgentLoop:
                         *request_messages,
                         Message(
                             role=MessageRole.SYSTEM,
+                            name=RUNTIME_NOTICE_NAME,
                             content=final_instruction,
                         ),
                     )
@@ -650,11 +681,20 @@ class AgentLoop:
             if continuation_messages is not None:
                 # Closing/repair instructions are generated, never canonical
                 # messages, and are included in the final budget calculation.
+                if (
+                    budget_warning_message is not None
+                    and budget_warning_message not in continuation_messages
+                ):
+                    continuation_messages = (
+                        *continuation_messages,
+                        budget_warning_message,
+                    )
                 if closing_can_deliver or force_final_answer:
                     continuation_messages = (
                         *continuation_messages,
                         Message(
                             role=MessageRole.SYSTEM,
+                            name=RUNTIME_NOTICE_NAME,
                             content=(
                                 _RUN_BUDGET_CLOSING_MESSAGE
                                 if closing_can_deliver
@@ -757,6 +797,7 @@ class AgentLoop:
                     *request_messages,
                     Message(
                         role=MessageRole.SYSTEM,
+                        name=RUNTIME_NOTICE_NAME,
                         content=_RUN_BUDGET_WARNING_MESSAGE,
                     ),
                 )
@@ -781,6 +822,7 @@ class AgentLoop:
                     *request_messages,
                     Message(
                         role=MessageRole.SYSTEM,
+                        name=RUNTIME_NOTICE_NAME,
                         content=(
                             _RUN_BUDGET_CLOSING_MESSAGE
                             if closing_can_deliver
@@ -1023,6 +1065,30 @@ class AgentLoop:
             )
             tool_calls_in_message = assistant_message.tool_calls
             if (
+                tool_calls_in_message
+                and response.finish_reason in {"max_tokens", "length"}
+                and not force_final_answer
+            ):
+                # 半截的工具调用不执行，丢弃这条回复，按截断恢复（与截断空回复共用计数）。
+                messages.pop()
+                if truncated_empty_retries < _TRUNCATED_EMPTY_RETRY_LIMIT:
+                    truncated_empty_retries += 1
+                    response_repair_message = Message(
+                        role=MessageRole.SYSTEM,
+                        name=RUNTIME_NOTICE_NAME,
+                        content=_TRUNCATED_TOOL_CALL_RETRY_MESSAGE,
+                    )
+                    continue
+                return await stop_with_error(
+                    ModelInvocationError(
+                        "model output was truncated by the output limit "
+                        f"{truncated_empty_retries + 1} times in a row "
+                        "without complete tool calls"
+                    ),
+                    AgentStopReason.MODEL_ERROR,
+                    step=step,
+                )
+            if (
                 mode is AgentMode.AUDIT
                 and response.finish_reason in {"max_tokens", "length"}
                 and not tool_calls_in_message
@@ -1044,6 +1110,7 @@ class AgentLoop:
                 )
                 response_repair_message = Message(
                     role=MessageRole.SYSTEM,
+                    name=RUNTIME_NOTICE_NAME,
                     content=(
                         "审计报告因输出预算耗尽而截断。保留本轮已取得的工具证据，"
                         "现在禁止调用工具，也不要重新核验或复述背景。"
@@ -1094,25 +1161,45 @@ class AgentLoop:
                             AgentStopReason.MODEL_ERROR,
                             step=step,
                         )
+                    truncated = response.finish_reason in {"max_tokens", "length"}
+                    if truncated:
+                        # 截断单独计数并允许多次恢复；每次都要求缩小动作、立即调用工具。
+                        if truncated_empty_retries < _TRUNCATED_EMPTY_RETRY_LIMIT:
+                            truncated_empty_retries += 1
+                            # Preserve explicit limits; only widen the default.
+                            if (
+                                self._max_output_tokens is None
+                                and effective_max_output_tokens
+                                < _EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS
+                            ):
+                                retry_max_output_tokens = min(
+                                    effective_max_output_tokens * 2,
+                                    _EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS,
+                                    self._context_manager.registry.lookup(
+                                        resolved_provider,
+                                        resolved_model,
+                                    ).max_output_tokens,
+                                )
+                            response_repair_message = Message(
+                                role=MessageRole.SYSTEM,
+                                name=RUNTIME_NOTICE_NAME,
+                                content=_TRUNCATED_EMPTY_RETRY_MESSAGE,
+                            )
+                            continue
+                        return await stop_with_error(
+                            ModelInvocationError(
+                                "model output was truncated by the output limit "
+                                f"{truncated_empty_retries + 1} times in a row "
+                                "without content or tool calls"
+                            ),
+                            AgentStopReason.MODEL_ERROR,
+                            step=step,
+                        )
                     if not empty_final_retry_used:
                         empty_final_retry_used = True
-                        # Only recover a confirmed truncation; preserve explicit limits.
-                        if (
-                            response.finish_reason in {"max_tokens", "length"}
-                            and self._max_output_tokens is None
-                            and effective_max_output_tokens
-                            < _EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS
-                        ):
-                            retry_max_output_tokens = min(
-                                effective_max_output_tokens * 2,
-                                _EMPTY_RESPONSE_RETRY_MAX_OUTPUT_TOKENS,
-                                self._context_manager.registry.lookup(
-                                    resolved_provider,
-                                    resolved_model,
-                                ).max_output_tokens,
-                            )
                         response_repair_message = Message(
                             role=MessageRole.SYSTEM,
+                            name=RUNTIME_NOTICE_NAME,
                             content=_EMPTY_FINAL_RETRY_MESSAGE,
                         )
                         continue
@@ -1149,6 +1236,7 @@ class AgentLoop:
                         textual_tool_call_retry_used = True
                         response_repair_message = Message(
                             role=MessageRole.SYSTEM,
+                            name=RUNTIME_NOTICE_NAME,
                             content=_TEXTUAL_TOOL_CALL_RETRY_MESSAGE,
                         )
                         continue
@@ -1226,6 +1314,9 @@ class AgentLoop:
                     tool_result_views=tool_view_state.snapshot(messages),
                 )
 
+            # 本步已产出工具调用：空回复重试只计“连续”失败，这里清零。
+            empty_final_retry_used = False
+            truncated_empty_retries = 0
             await record_messages()
             round_outcome = await self._tool_round_executor.execute(
                 tool_calls_in_message,

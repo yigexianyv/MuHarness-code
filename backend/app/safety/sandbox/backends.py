@@ -131,7 +131,6 @@ class DockerSandboxBackend(SandboxBackend):
         )
         self.image = image or preferred_env(
             "MUHARNESS_SANDBOX_IMAGE",
-            "VESTA_SANDBOX_IMAGE",
             "muharness-sandbox:latest",
         )
         self.memory = memory

@@ -1123,3 +1123,46 @@ def test_chat_auto_selects_the_only_configured_provider(
     )
 
     assert select_provider(settings, None) is ModelProvider.QWEN
+
+
+# 运行时提醒不得并入顶部 system（会改缓存前缀）。工具循环中要并进最后一个
+# tool_result 的内容，不能新增 text 块：DeepSeek 会把含 text 块的 user 轮当成
+# 新用户消息，丢弃此前拼接的思考，前文重新渲染，缓存整体失效。
+def test_anthropic_runtime_notice_stays_in_place() -> None:
+    from app.models.providers.anthropic import (
+        RUNTIME_NOTICE_SOURCE,
+        _anthropic_messages,
+    )
+    from app.models.types import RUNTIME_NOTICE_NAME
+
+    history = (
+        Message(role=MessageRole.SYSTEM, content="base prompt"),
+        Message(role=MessageRole.USER, content="task"),
+        Message(
+            role=MessageRole.ASSISTANT,
+            tool_calls=(ToolCall(id="t1", name="count", arguments={}),),
+        ),
+        Message(role=MessageRole.TOOL, tool_call_id="t1", content="1"),
+    )
+    notice = Message(
+        role=MessageRole.SYSTEM, name=RUNTIME_NOTICE_NAME, content="预算预警"
+    )
+    system_before, messages_before = _anthropic_messages(history)
+    system, messages = _anthropic_messages((*history, notice))
+
+    assert system == system_before == "base prompt"
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert messages[:2] == messages_before[:2]
+    last = messages[-1]["content"]
+    assert len(last) == 1
+    assert last[0]["type"] == "tool_result"
+    assert last[0]["tool_use_id"] == "t1"
+    assert last[0]["content"] == (
+        f"1\n\n<system-reminder>\n{RUNTIME_NOTICE_SOURCE}\n预算预警\n</system-reminder>"
+    )
+
+    # 不在工具循环中（末尾是普通 user 文本）时，作为 text 块并入该 user 轮
+    _, plain = _anthropic_messages((*history[:2], notice))
+    assert [m["role"] for m in plain] == ["user"]
+    assert plain[0]["content"][0] == {"type": "text", "text": "task"}
+    assert "预算预警" in plain[0]["content"][1]["text"]

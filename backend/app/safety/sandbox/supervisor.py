@@ -22,9 +22,7 @@ from .models import (
 _PROTECTED_RELATIVE_PATHS = (
     ".git",
     ".muharness",
-    ".vesta",
     "backend/.muharness",
-    "backend/.vesta",
     ".env",
     "backend/.env",
 )
@@ -219,7 +217,7 @@ class SandboxSupervisor:
 
 # 函数说明：_platform_backend
 # 用途：在隔离执行与沙箱生命周期中处理 `_platform_backend`，通过 `preferred_env('
-# MUHARNESS_SANDBOX_BACKEND', 'VESTA_SANDBOX_BACKEND', 'auto').strip().…` 完成首个内部处
+# MUHARNESS_SANDBOX_BACKEND', 'auto').strip().…` 完成首个内部处
 # 理步骤。
 # 参数：
 #   workspace_root：文件工具允许访问的工作区根目录，类型 `Path`。
@@ -228,7 +226,7 @@ class SandboxSupervisor:
 # `DockerSandboxBackend(workspace_root)`；`UnsupportedSandboxBackend('docker disabled')`
 # 。
 # 关键调用（按源码出现顺序，实际执行取决于分支）：
-# `preferred_env('MUHARNESS_SANDBOX_BACKEND', 'VESTA_SANDBOX_BACKEND', 'auto'…` →
+# `preferred_env('MUHARNESS_SANDBOX_BACKEND', 'auto'…` →
 # `preferred_env` → `UnsupportedSandboxBackend` → `DockerSandboxBackend`。
 # 分支与异常：
 #   当 `requested not in {'auto', 'docker', 'unsupported'}` 时，返回
@@ -241,7 +239,7 @@ def _platform_backend(
     instance_id: str | None = None,
 ) -> SandboxBackend:
     requested = preferred_env(
-        "MUHARNESS_SANDBOX_BACKEND", "VESTA_SANDBOX_BACKEND", "auto"
+        "MUHARNESS_SANDBOX_BACKEND", "auto"
     ).strip().lower()
     if requested not in {"auto", "docker", "unsupported"}:
         return UnsupportedSandboxBackend(
