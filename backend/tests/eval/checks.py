@@ -9,8 +9,13 @@
 
 from __future__ import annotations
 
+import json
+import os
+import posixpath
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from .outcome import Outcome, ToolUse, TurnOutcome
@@ -74,6 +79,11 @@ def validate_spec(spec: dict[str, Any]) -> str:
     (name,) = spec
     if name not in _REGISTRY:
         raise ValueError(f"未知检查项 {name!r}，可用：{', '.join(known_checks())}")
+    if name == "file" and isinstance(spec[name], dict):
+        options = spec[name]
+        allowed = {"path", "exists", "contains", "not_contains", "lines", "equals", "sha256", "equals_original"}
+        if unknown := set(options) - allowed:
+            raise ValueError(f"未知 file 选项：{', '.join(sorted(unknown))}")
     return name
 
 
@@ -284,11 +294,84 @@ def _tool_used(outcome: Outcome, arg: Any) -> tuple[bool, str]:
     matches = [tool for tool in _tools(outcome, spec) if tool.name == name]
     if spec.get("success") is not None:
         matches = [tool for tool in matches if tool.success is bool(spec["success"])]
+    if "arguments_contains" in spec:
+        matches = [tool for tool in matches if _arguments_match(tool, spec["arguments_contains"])]
+    if "exit_code" in spec:
+        matches = [tool for tool in matches if tool.exit_code == spec["exit_code"]]
+    if "error_contains" in spec:
+        matches = [tool for tool in matches if _match_text(tool.error or "", spec["error_contains"])[0]]
+    if "approval_decision" in spec:
+        approved = {
+            item.call_id for turn in _scope(outcome, spec) for item in turn.approval_calls
+            if item.decision == spec["approval_decision"]
+        }
+        matches = [tool for tool in matches if tool.call_id is not None and tool.call_id in approved]
     low, high = int(spec.get("min", 1)), spec.get("max")
     count = len(matches)
     passed = count >= low and (high is None or count <= int(high))
     bound = f"{low}~{high}" if high is not None else f"≥{low}"
     return passed, f"{name} 调用 {count} 次（要求 {bound}）"
+
+
+def _arguments(tool: ToolUse) -> dict[str, Any]:
+    value = tool.arguments
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _arguments_match(tool: ToolUse, expected: dict[str, Any]) -> bool:
+    actual = _arguments(tool)
+    return all(
+        isinstance(actual.get(key), str)
+        and all(part in actual[key] for part in _as_list(parts))
+        for key, parts in expected.items()
+    )
+
+
+def _path_key(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = posixpath.normpath(value.replace("\\", "/"))
+    return normalized.casefold() if os.name == "nt" else normalized
+
+
+@check("read_before_write")
+def _read_before_write(outcome: Outcome, arg: Any) -> tuple[bool, str]:
+    path = _path_key(arg["path"])
+    reads: list[tuple[str | None, int, int]] = []
+    for turn_index, turn in enumerate(_scope(outcome, arg)):
+        for tool in turn.tools:
+            if _path_key(_arguments(tool).get("path")) != path:
+                continue
+            if tool.name == "read_file" and tool.success and tool.round_index is not None:
+                reads.append((turn.conversation_id, turn_index, tool.round_index))
+            if tool.name in {"write_file", "edit_file"}:
+                if tool.round_index is None:
+                    return False, "缺少工具轮次，无法确认读取结果已送回模型"
+                passed = any(
+                    conversation == turn.conversation_id and (index, step) < (turn_index, tool.round_index)
+                    for conversation, index, step in reads
+                )
+                return passed, "首次修改前已读取并经过模型请求" if passed else "首次修改前没有已送回模型的成功读取"
+    return False, "没有修改目标文件，不能证明先读后写"
+
+
+@check("grounded_answer")
+def _grounded_answer(outcome: Outcome, arg: Any) -> tuple[bool, str]:
+    """Requested facts must occur in successful tool outputs actually sent to the model."""
+    turns = _scope(outcome, arg)
+    matched, detail = _match_text("\n".join(turn.answer for turn in turns), arg)
+    if not matched:
+        return False, detail
+    outputs = [output for turn in turns for output in turn.received_tool_outputs]
+    if not outputs:
+        return False, "没有成功工具输出的最终请求记录"
+    matched, detail = _match_text("\n".join(outputs), arg)
+    return matched, "答案事实出现在实际请求工具内容中" if matched else f"实际请求内容{detail}"
 
 
 # 函数说明：_tool_absent
@@ -394,6 +477,15 @@ def _answer_has(outcome: Outcome, arg: Any) -> tuple[bool, str]:
     return _match_text("\n".join(turn.answer for turn in turns), arg)
 
 
+@check("answer_number")
+def _answer_number(outcome: Outcome, arg: Any) -> tuple[bool, str]:
+    expected = Decimal(str(arg["value"] if isinstance(arg, dict) else arg))
+    text = "\n".join(turn.answer for turn in _scope(outcome, arg))
+    tokens = re.findall(r"(?<![\d,.])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\d,])", text)
+    found = any(Decimal(token.replace(",", "")) == expected for token in tokens)
+    return found, f"回答包含数字 {expected}" if found else f"回答缺少数字 {expected}"
+
+
 # 函数说明：_answer_lacks
 # 用途：处理回复`lacks`，供回归测试与测试辅助使用。
 # 参数：
@@ -436,12 +528,23 @@ def _answer_lacks(outcome: Outcome, arg: Any) -> tuple[bool, str]:
 @check("file")
 def _file(outcome: Outcome, arg: Any) -> tuple[bool, str]:
     path = arg["path"]
+    if arg.get("equals_original") or "sha256" in arg:
+        actual = outcome.file_hashes.get(path)
+        expected = outcome.initial_file_hashes.get(path) if arg.get("equals_original") else arg["sha256"]
+        if actual is None or expected is None:
+            return False, f"{path} 缺少原始字节哈希或文件不存在"
+        if actual != expected:
+            return False, f"{path} 文件字节已改变"
+        if not any(key in arg for key in ("contains", "not_contains", "lines", "equals")):
+            return True, f"{path} 字节哈希一致"
     exists = path in outcome.files
     if arg.get("exists", True) is False:
         return (not exists, "文件存在" if exists else "文件不存在")
     if not exists:
         return False, f"{path} 不存在"
     content = outcome.files[path]
+    if "equals" in arg and content != arg["equals"]:
+        return False, f"{path} 完整文本不符合要求"
     if "lines" in arg and content.splitlines() != arg["lines"]:
         return False, f"{path} 行内容或顺序不符合要求"
     missing = [word for word in _as_list(arg.get("contains")) if word not in content]
@@ -624,6 +727,24 @@ def _context_compacted(outcome: Outcome, arg: Any) -> tuple[bool, str]:
 def _summary_updated(outcome: Outcome, _: Any) -> tuple[bool, str]:
     count = sum(step.summary_updated for turn in outcome.turns for step in turn.context)
     return count > 0, f"滚动摘要更新 {count} 次"
+
+
+@check("summary_covers_turn")
+def _summary_covers_turn(outcome: Outcome, arg: Any) -> tuple[bool, str]:
+    index = int(arg)
+    if not 1 <= index <= len(outcome.turns):
+        return False, "目标对话轮次不存在"
+    target = outcome.turns[index - 1]
+    if target.user_sequence is None or target.conversation_id is None:
+        return False, "缺少目标用户消息的原始历史位置"
+    covered = any(
+        step.summary_updated and step.summary_covered_after is not None
+        and step.summary_covered_after > target.user_sequence
+        for turn in outcome.turns[index - 1:]
+        if turn.conversation_id == target.conversation_id
+        for step in turn.context
+    )
+    return covered, f"第 {index} 轮用户消息" + ("已由更新摘要覆盖" if covered else "未被更新摘要覆盖")
 
 
 # ---------------------------------------------------------------------------

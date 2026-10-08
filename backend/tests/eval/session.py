@@ -88,6 +88,7 @@ async def run_cases(
     keep_outcomes: bool = False,
     keep_stage: bool = False,
     progress: Progress | None = None,
+    checkpoint: Callable[[RunReport], object] | None = None,
 ) -> RunReport:
     preflight(cases)
     report = RunReport(
@@ -99,6 +100,8 @@ async def run_cases(
         started_at=now_iso(),
     )
     say = progress or (lambda _: None)
+    if checkpoint is not None:
+        checkpoint(report)
     for case in cases:
         missing = [need for need in case.requires if need == "docker" and not docker_available()]
         for attempt in range(1, repeat + 1):
@@ -111,6 +114,8 @@ async def run_cases(
                     error=f"缺少运行条件：{'、'.join(missing)}",
                 )
                 report.attempts.append(record(case, outcome, [], keep_outcome=False))
+                if checkpoint is not None:
+                    checkpoint(report)
                 continue
             try:
                 async with open_stage(case, variant, factory, keep=keep_stage) as stage:
@@ -126,6 +131,8 @@ async def run_cases(
             verdicts = evaluate(outcome, case.checks)
             item = record(case, outcome, verdicts, keep_outcome=keep_outcomes)
             report.attempts.append(item)
+            if checkpoint is not None:
+                checkpoint(report)
             mark = "✅" if item.passed else "❌"
             reason = "" if item.passed else " — " + (
                 item.error
@@ -136,6 +143,8 @@ async def run_cases(
                 f"{outcome.duration_seconds:g}s  {outcome.chargeable_tokens} tok{reason}"
             )
     report.finished_at = now_iso()
+    if checkpoint is not None:
+        checkpoint(report)
     return report
 
 
