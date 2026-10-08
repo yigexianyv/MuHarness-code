@@ -229,6 +229,7 @@ async def _run_variant(args: argparse.Namespace, name: str) -> RunReport:
         keep_outcomes=args.keep_outcomes,
         keep_stage=args.keep_stage,
         progress=lambda line: print(line, flush=True),
+        checkpoint=lambda report: report.save(args.out),
     )
     json_path, md_path = report.save(args.out)
     print(f"报告：{md_path}\n数据：{json_path}")
