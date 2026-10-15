@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.domain.memory import (
@@ -30,6 +31,10 @@ class RuntimeContextInjection:
     recall_mode: str | None = None
 
 
+# 运行环境说明，例如工作区依赖已由准备脚本安装；返回 None 表示没有可说明的内容
+EnvironmentNote = Callable[[], Message | None]
+
+
 class RuntimeContextSession:
     # 函数说明：RuntimeContextSession.__init__
     # 用途：初始化 RuntimeContextSession；参数及实际保存的实例字段见下方说明。
@@ -55,7 +60,11 @@ class RuntimeContextSession:
         skill_context_provider: SkillContextProvider | None,
         task_context_provider: TaskContextProvider | None,
         recall_query: MemoryRecallQueryInputs | None = None,
+        environment_note: EnvironmentNote | None = None,
     ) -> None:
+        self._environment_note = environment_note
+        self._environment_message: Message | None = None
+        self._environment_loaded = False
         self._memory_manager = memory_manager
         self._skill_store = skill_store
         self._skill_context_provider = skill_context_provider
@@ -102,6 +111,15 @@ class RuntimeContextSession:
     ) -> RuntimeContextInjection:
         """组合系统提示、会话历史、记忆与任务上下文，形成模型请求消息。"""
         messages: list[Message] = []
+        if self._environment_note is not None and not self._environment_loaded:
+            # 一次 Run 内只读取一次，保持请求前缀稳定
+            self._environment_loaded = True
+            try:
+                self._environment_message = self._environment_note()
+            except Exception:
+                self._environment_message = None
+        if self._environment_message is not None:
+            messages.append(self._environment_message)
         if self._memory_manager is not None and not self._memory_loaded:
             self._memory_loaded = True
             try:

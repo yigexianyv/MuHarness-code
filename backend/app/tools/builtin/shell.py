@@ -50,11 +50,14 @@ class ShellCommandTool(BaseTool):
         workspace_root: str | Path | None = None,
         *,
         sandbox_supervisor: SandboxSupervisor | None = None,
+        allowed_domains: tuple[str, ...] = (),
     ) -> None:
         self._workspace_root = workspace_root_path(workspace_root)
         self._sandbox_supervisor = sandbox_supervisor or SandboxSupervisor(
             self._workspace_root
         )
+        # 非空时沙箱仍断网，只能经出网代理以 HTTPS 访问这些域名
+        self._allowed_domains = allowed_domains
 
     # 函数说明：ShellCommandTool.definition
     # 用途：提供 ShellCommandTool 的模型可见定义，包含名称、说明、参数结构及权限声明。
@@ -68,7 +71,7 @@ class ShellCommandTool(BaseTool):
                 "在工作区沙箱内用 /bin/sh 执行命令，返回退出码、标准输出、标准错误和超时状态。"
                 "需要运行测试、构建或其他本地程序时使用；简单列目录、读写文本优先用对应文件"
                 "工具。模型工具名不等于沙箱中的可执行程序，不通过 shell 猜测工具入口或绕过"
-                "审批、只读角色和沙箱限制。需要人工审批，沙箱网络禁用。默认从工作区根目录"
+                f"审批、只读角色和沙箱限制。需要人工审批，{self._network_description()}默认从工作区根目录"
                 "启动，子目录用 working_directory 指定，不猜工作区目录名。依赖命令用 &&，"
                 "不要用结尾 echo 掩盖失败。调用成功不代表命令成功；检查 exit_code、timed_out"
                 "及输出，退出码为零也只支持实际执行的检查，不能证明整个任务完成。"
@@ -101,6 +104,15 @@ class ShellCommandTool(BaseTool):
             },
             strict=True,
             permission=ToolPermission.HUMAN_APPROVAL,
+        )
+
+    def _network_description(self) -> str:
+        if not self._allowed_domains:
+            return "沙箱网络禁用。"
+        return (
+            "沙箱只能经代理以 HTTPS 访问这些域名："
+            + "、".join(self._allowed_domains)
+            + "，其他网络不可用。"
         )
 
     def execution_timeout(self, arguments: dict[str, Any]) -> float | None:
@@ -195,15 +207,18 @@ class ShellCommandTool(BaseTool):
         process: asyncio.subprocess.Process | None = None
         try:
             environment = _shell_environment()
+            config = SandboxConfig(
+                filesystem=filesystem,
+                network=SandboxNetworkMode.DENIED,
+                allowed_domains=self._allowed_domains,
+            )
+            await self._sandbox_supervisor.ensure_egress(config)
             launch = self._sandbox_supervisor.prepare_launch(
                 command="/bin/sh",
                 args=("-c", command),
                 env=environment,
                 cwd=str(cwd),
-                config=SandboxConfig(
-                    filesystem=filesystem,
-                    network=SandboxNetworkMode.DENIED,
-                ),
+                config=config,
             )
             process = await asyncio.create_subprocess_exec(
                 launch.command,

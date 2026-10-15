@@ -12,7 +12,10 @@ export interface ApprovalCardProps {
   onDeny: (id: string) => void
 }
 
+const WORKSPACE_SETUP_TOOL = 'workspace_setup'
+
 function sandboxApprovalLabel(approval: ApprovalRequest): string {
+  if (approval.tool_name === WORKSPACE_SETUP_TOOL) return '联网执行环境准备脚本'
   if (['run_shell_command', 'run_command'].includes(approval.tool_name)) {
     return '执行终端命令'
   }
@@ -21,6 +24,9 @@ function sandboxApprovalLabel(approval: ApprovalRequest): string {
 }
 
 function sandboxApprovalDescription(approval: ApprovalRequest): string {
+  if (approval.tool_name === WORKSPACE_SETUP_TOOL) {
+    return '脚本会在独立容器中运行，可以访问外网，并能读写工作区（.env、.git 等受保护路径除外）。请逐行确认脚本内容；执行结束后 Agent 仍只使用断网容器。'
+  }
   if (['run_shell_command', 'run_command'].includes(approval.tool_name)) {
     return 'MuHarness 需要在本地终端执行以下命令。请确认命令内容和影响后再允许。'
   }
@@ -28,6 +34,23 @@ function sandboxApprovalDescription(approval: ApprovalRequest): string {
     return 'MuHarness 需要向外部服务发送网络请求。请确认目标和参数后再允许。'
   }
   return '这项操作可能修改本地环境或访问外部资源，请确认后再继续。'
+}
+
+interface SetupScript {
+  path: string
+  sha256: string
+  script: string
+}
+
+/** 准备脚本必须完整展示，不能藏在折叠的技术详情里。 */
+function setupScript(approval: ApprovalRequest): SetupScript | null {
+  if (approval.tool_name !== WORKSPACE_SETUP_TOOL) return null
+  const { script_path: path, sha256, script } = approval.arguments ?? {}
+  return {
+    path: typeof path === 'string' ? path : '',
+    sha256: typeof sha256 === 'string' ? sha256 : '',
+    script: typeof script === 'string' ? script : '',
+  }
 }
 
 function commandPreview(approval: ApprovalRequest): string | null {
@@ -47,6 +70,7 @@ export default function ApprovalCard({
   const title = sandboxApprovalLabel(approval)
   const description = sandboxApprovalDescription(approval)
   const command = commandPreview(approval)
+  const setup = setupScript(approval)
   const argsText = (() => {
     try {
       return JSON.stringify(approval.arguments, null, 2)
@@ -71,10 +95,16 @@ export default function ApprovalCard({
           <code>{command}</code>
         </div>
       ) : null}
-      {approval.reason ? (
+      {setup ? (
+        <div className="approval-card__command" data-testid="setup-script">
+          <span>即将联网执行 {setup.path}（SHA-256 {setup.sha256.slice(0, 12)}）</span>
+          <pre>{setup.script}</pre>
+        </div>
+      ) : null}
+      {approval.reason && !setup ? (
         <div className="approval-card__reason">{approval.reason}</div>
       ) : null}
-      {argsText ? (
+      {argsText && !setup ? (
         <details className="approval-card__details">
           <summary>查看技术详情</summary>
           <div className="approval-card__tech">工具：{approval.tool_name}</div>

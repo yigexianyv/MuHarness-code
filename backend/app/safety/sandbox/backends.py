@@ -8,11 +8,17 @@ import shutil
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
+from functools import cache
 from pathlib import Path
 
 from app.paths import preferred_env
 
-from .errors import SandboxUnavailableError
+from .egress_proxy import (
+    ALLOW_CIDRS_ENV,
+    normalize_allow_networks,
+    normalize_domain_patterns,
+)
+from .errors import SandboxPolicyError, SandboxUnavailableError
 from .models import (
     SandboxFilesystemMode,
     SandboxLaunchSpec,
@@ -24,6 +30,10 @@ logger = logging.getLogger("muharness.sandbox")
 
 SANDBOX_LABEL = "com.muharness.sandbox"
 INSTANCE_LABEL = "com.muharness.instance"
+# 出网代理与沙箱共享的卷挂载点；沙箱只读挂载，只能连接 socket，不能替换它
+EGRESS_MOUNT = "/egress"
+EGRESS_SOCKET = f"{EGRESS_MOUNT}/proxy.sock"
+EGRESS_READY_TIMEOUT_SECONDS = 15.0
 
 
 class SandboxBackend(ABC):
@@ -53,6 +63,15 @@ class SandboxBackend(ABC):
     async def remove_orphans(self) -> int:
         """清理上一次进程遗留、仍在运行的沙箱；没有可清理的对象时返回 0。"""
         return 0
+
+    async def ensure_egress(self, domains: tuple[str, ...]) -> None:
+        """确保白名单出网代理在运行；不支持的后端直接拒绝，不降级成全通或全断。"""
+        del domains
+        raise SandboxUnavailableError("当前沙箱后端不支持域名白名单")
+
+    async def close(self) -> None:
+        """释放后端持有的长驻资源（如出网代理）。"""
+        return None
 
 
 class UnsupportedSandboxBackend(SandboxBackend):
@@ -120,6 +139,7 @@ class DockerSandboxBackend(SandboxBackend):
         cpus: str = "2",
         pids_limit: int = 128,
         instance_id: str | None = None,
+        egress_allow_cidrs: tuple[str, ...] | None = None,
     ) -> None:
         self.workspace_root = Path(workspace_root).expanduser().resolve()
         # 区分同一台 Docker 上的多个后端：启动清理只删除本实例创建的容器
@@ -136,6 +156,26 @@ class DockerSandboxBackend(SandboxBackend):
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
+        # 宿主机 TUN 代理（fake-ip）把域名解析到保留网段时，需要额外放行这些网段
+        if egress_allow_cidrs is None:
+            egress_allow_cidrs = tuple(
+                preferred_env("MUHARNESS_SANDBOX_EGRESS_ALLOW_CIDRS", "")
+                .replace(",", " ")
+                .split()
+            )
+        try:
+            self.egress_allow_cidrs = normalize_allow_networks(egress_allow_cidrs)
+        except ValueError as exc:
+            raise SandboxPolicyError(
+                f"MUHARNESS_SANDBOX_EGRESS_ALLOW_CIDRS 配置有误：{exc}"
+            ) from exc
+        suffix = instance_id or uuid.uuid4().hex[:16]
+        self.egress_container = f"muharness-egress-{suffix}"
+        self.egress_volume = f"muharness-egress-{suffix}"
+        # 代理已确认就绪时的白名单；None 表示未启动或状态未知
+        self._egress_domains: tuple[str, ...] | None = None
+        self._egress_started = False
+        self._egress_lock = asyncio.Lock()
 
     # 函数说明：DockerSandboxBackend.prepare
     # 用途：将沙箱策略映射为 Docker 命令和挂载配置。
@@ -150,8 +190,8 @@ class DockerSandboxBackend(SandboxBackend):
     # `shutil.rmtree`。
     # 分支与异常：
     #   当 `not self.docker_command` 时，抛出 `SandboxUnavailableError(…)`。
-    #   当 `policy.allowed_domains` 时，抛出
-    # `SandboxUnavailableError('Docker 后端尚不能强制域名白名单，拒绝弱化网络策略')`。
+    #   当 `policy.allowed_domains` 非空但出网代理未就绪或白名单不一致时，抛出
+    # `SandboxUnavailableError`；就绪时挂载代理卷并用转发器包装命令。
     #   捕获 `BaseException` 后，重新抛出原异常。
     def prepare(
         self,
@@ -166,10 +206,7 @@ class DockerSandboxBackend(SandboxBackend):
             raise SandboxUnavailableError(
                 "Docker CLI 不可用；请安装 Docker Engine，并确保 docker 命令可用"
             )
-        if policy.allowed_domains:
-            raise SandboxUnavailableError(
-                "Docker 后端尚不能强制域名白名单，拒绝弱化网络策略"
-            )
+        egress_domains = self._egress_domains_for(policy)
         self._reject_external_roots(policy)
 
         container_name = f"muharness-sandbox-{uuid.uuid4().hex[:16]}"
@@ -206,7 +243,22 @@ class DockerSandboxBackend(SandboxBackend):
             container_cwd, mounts, cleanup_paths = self._mounts(policy)
             for mount in mounts:
                 docker_args.extend(("--mount", mount))
+            if egress_domains:
+                docker_args.extend((
+                    "--mount",
+                    f"type=volume,source={self.egress_volume},"
+                    f"target={EGRESS_MOUNT},readonly",
+                ))
             docker_args.extend(("--workdir", container_cwd, self.image))
+            if egress_domains:
+                # 容器仍是 --network none；转发器确认代理可连后再启动命令
+                docker_args.extend((
+                    "python3",
+                    "-I",
+                    "-c",
+                    _script_source("egress_forwarder.py"),
+                    EGRESS_SOCKET,
+                ))
             docker_args.extend((str(command), *args))
             return SandboxLaunchSpec(
                 command=self.docker_command,
@@ -272,6 +324,145 @@ class DockerSandboxBackend(SandboxBackend):
             len(container_ids),
         )
         return len(container_ids)
+
+    async def ensure_egress(self, domains: tuple[str, ...]) -> None:
+        """启动（或确认仍在运行）只放行白名单域名的出网代理容器。
+
+        代理容器有网络，沙箱容器没有；两者只共享一个内存卷，里面是代理的 Unix socket。
+        每次调用都检查容器是否还在运行，Docker 重启等情况下会自动重新拉起。
+        """
+        if not self.docker_command:
+            raise SandboxUnavailableError(
+                "Docker CLI 不可用；请安装 Docker Engine，并确保 docker 命令可用"
+            )
+        allowed = _normalize_domains(domains)
+        if not allowed:
+            raise SandboxPolicyError("域名白名单为空")
+        async with self._egress_lock:
+            if self._egress_domains == allowed and await self._egress_running():
+                return
+            self._egress_domains = None
+            await self._start_egress(allowed)
+            self._egress_domains = allowed
+
+    async def close(self) -> None:
+        if not self._egress_started or not self.docker_command:
+            return
+        async with self._egress_lock:
+            self._egress_domains = None
+            self._egress_started = False
+            await _run_docker(
+                self.docker_command, "rm", "--force", self.egress_container
+            )
+            await _run_docker(
+                self.docker_command, "volume", "rm", "--force", self.egress_volume
+            )
+
+    async def _start_egress(self, allowed: tuple[str, ...]) -> None:
+        docker = self.docker_command
+        assert docker is not None
+        self._egress_started = True
+        await _run_docker(docker, "rm", "--force", self.egress_container)
+        user = _container_user()
+        uid, gid = user.split(":")
+        created = await _run_docker(
+            docker,
+            "volume",
+            "create",
+            "--driver",
+            "local",
+            "--opt",
+            "type=tmpfs",
+            "--opt",
+            "device=tmpfs",
+            "--opt",
+            f"o=size=1m,uid={uid},gid={gid},mode=0700",
+            "--label",
+            f"{SANDBOX_LABEL}=true",
+            self.egress_volume,
+        )
+        if created is None:
+            raise SandboxUnavailableError("无法创建出网代理的共享卷")
+        run_args = [
+            "run",
+            "--detach",
+            "--name",
+            self.egress_container,
+            "--label",
+            f"{SANDBOX_LABEL}=true",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--pids-limit",
+            "64",
+            "--memory",
+            "256m",
+            "--cpus",
+            "1",
+            "--user",
+            user,
+            "--mount",
+            f"type=volume,source={self.egress_volume},target={EGRESS_MOUNT}",
+        ]
+        if self.instance_id:
+            run_args.extend(("--label", f"{INSTANCE_LABEL}={self.instance_id}"))
+        if self.egress_allow_cidrs:
+            run_args.extend((
+                "--env",
+                f"{ALLOW_CIDRS_ENV}={','.join(self.egress_allow_cidrs)}",
+            ))
+        run_args.extend((
+            self.image,
+            "python3",
+            "-I",
+            "-c",
+            _script_source("egress_proxy.py"),
+            EGRESS_SOCKET,
+            *allowed,
+        ))
+        if await _run_docker(docker, *run_args) is None:
+            raise SandboxUnavailableError("出网代理容器启动失败")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + EGRESS_READY_TIMEOUT_SECONDS
+        while loop.time() < deadline:
+            logs = await _run_docker(docker, "logs", self.egress_container)
+            if logs is not None and "READY" in logs:
+                logger.info("egress proxy ready for %s", ", ".join(allowed))
+                return
+            if not await self._egress_running():
+                break
+            await asyncio.sleep(0.2)
+        logs = await _run_docker(docker, "logs", "--tail", "20", self.egress_container)
+        await _run_docker(docker, "rm", "--force", self.egress_container)
+        raise SandboxUnavailableError(
+            "出网代理未能就绪" + (f"：{logs.strip()}" if logs and logs.strip() else "")
+        )
+
+    async def _egress_running(self) -> bool:
+        assert self.docker_command is not None
+        state = await _run_docker(
+            self.docker_command,
+            "inspect",
+            "--format",
+            "{{.State.Running}}",
+            self.egress_container,
+        )
+        return state is not None and state.strip() == "true"
+
+    def _egress_domains_for(self, policy: SandboxPolicy) -> tuple[str, ...]:
+        """带白名单的策略只能在代理已就绪、且白名单一致时启动，否则拒绝。"""
+        if not policy.allowed_domains:
+            return ()
+        if policy.network is not SandboxNetworkMode.DENIED:
+            raise SandboxPolicyError("域名白名单只能与断网模式一起使用")
+        allowed = _normalize_domains(policy.allowed_domains)
+        if self._egress_domains != allowed:
+            raise SandboxUnavailableError(
+                "域名白名单需要出网代理，但代理尚未就绪；拒绝启动沙箱"
+            )
+        return allowed
 
     def _reject_external_roots(self, policy: SandboxPolicy) -> None:
         roots = (*policy.readable_roots, *policy.writable_roots)
@@ -408,6 +599,20 @@ def resolve_executable(command: str, *, env: dict[str, str]) -> Path:
     if not resolved.is_file() or not executable.is_file():
         raise SandboxUnavailableError(f"可执行文件无效：{executable}")
     return executable
+
+
+def _normalize_domains(domains: tuple[str, ...]) -> tuple[str, ...]:
+    try:
+        return normalize_domain_patterns(domains)
+    except ValueError as exc:
+        raise SandboxPolicyError(str(exc)) from exc
+
+
+@cache
+def _script_source(name: str) -> str:
+    """读取在容器里用 python3 -c 运行的脚本源码（只依赖标准库）。"""
+    source = Path(__file__).with_name(name).read_text(encoding="utf-8")
+    return source.replace("\r\n", "\n")
 
 
 async def _run_docker(

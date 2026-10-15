@@ -244,7 +244,7 @@ def test_docker_backend_compiles_hardened_ephemeral_container(
         shutil.rmtree(path)
 
 
-# 函数说明：test_docker_backend_rejects_domain_allowlist
+# 函数说明：test_docker_backend_rejects_allowlist_without_egress_proxy
 # 用途：回归验证回归测试与测试辅助中的 `docker_backend_rejects_domain_allowlist` 场景，
 # 下方断言说明列出实际通过条件。
 # 参数：
@@ -254,8 +254,8 @@ def test_docker_backend_compiles_hardened_ephemeral_container(
 # `DockerSandboxBackend` → `pytest.raises` → `supervisor.prepare_launch` →
 # `SandboxConfig`。
 # 分支与异常：
-#   预期异常：`pytest.raises(SandboxUnavailableError, match='域名白名单')`。
-def test_docker_backend_rejects_domain_allowlist(tmp_path: Path) -> None:
+#   预期异常：`pytest.raises(SandboxUnavailableError, match='出网代理')`。
+def test_docker_backend_rejects_allowlist_without_egress_proxy(tmp_path: Path) -> None:
     supervisor = SandboxSupervisor(
         tmp_path,
         native_backend=DockerSandboxBackend(
@@ -264,13 +264,17 @@ def test_docker_backend_rejects_domain_allowlist(tmp_path: Path) -> None:
         ),
     )
 
-    with pytest.raises(SandboxUnavailableError, match="域名白名单"):
+    # 白名单需要先由 ensure_egress 拉起出网代理；没有代理时拒绝启动，不退回直连
+    with pytest.raises(SandboxUnavailableError, match="出网代理"):
         supervisor.prepare_launch(
             command="/bin/sh",
             args=("-c", "true"),
             env={"PATH": os.environ.get("PATH", "")},
             cwd=None,
-            config=SandboxConfig(allowed_domains=("example.com",)),
+            config=SandboxConfig(
+                network=SandboxNetworkMode.DENIED,
+                allowed_domains=("example.com",),
+            ),
         )
 
 

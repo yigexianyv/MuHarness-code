@@ -36,7 +36,7 @@ from app.tools.executor import ToolExecutor
 from app.tools.registry import ToolRegistry
 
 from .budget import RunBudget, RunBudgetStatus, chargeable_tokens
-from .context_session import RuntimeContextSession
+from .context_session import EnvironmentNote, RuntimeContextSession
 from .errors import (
     AgentRuntimeError,
     ContextPreparationError,
@@ -219,7 +219,9 @@ class AgentLoop:
         skill_context_provider: SkillContextProvider | None,
         run_budget: RunBudget,
         constraints_provider: ConstraintsProvider | None = None,
+        environment_note: EnvironmentNote | None = None,
     ) -> None:
+        self._environment_note = environment_note
         self._model_registry = model_registry
         self._tool_registry = tool_registry
         self._tool_executor = tool_executor
@@ -336,6 +338,7 @@ class AgentLoop:
             skill_store=self._skill_store,
             skill_context_provider=self._skill_context_provider,
             task_context_provider=self._task_context_provider,
+            environment_note=self._environment_note,
             recall_query=(
                 MemoryRecallQueryInputs(
                     user_message=user_input,

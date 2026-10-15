@@ -60,6 +60,7 @@ from .events import (
     CompositeEventHandler,
     NullEventHandler,
 )
+from .context_session import EnvironmentNote
 from .loop import AgentLoop, ConstraintsProvider
 from .memory_post_run import PostRunMemoryCoordinator
 from .result import (
@@ -159,6 +160,7 @@ class AgentRuntime:
         constraints_provider: ConstraintsProvider | None = None,
         run_step_store: SQLiteRunStepStore | None = None,
         workspace_snapshots: WorkspaceSnapshotStore | None = None,
+        environment_note: EnvironmentNote | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1")
@@ -219,6 +221,7 @@ class AgentRuntime:
             skill_context_provider=skill_context_provider,
             run_budget=self._run_budget,
             constraints_provider=constraints_provider,
+            environment_note=environment_note,
         )
 
     # 函数说明：AgentRuntime.tool_executor

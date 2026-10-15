@@ -497,6 +497,11 @@ class MeaRunner:
             except (asyncio.CancelledError, Exception):
                 pass
 
+    @property
+    def has_active_loops(self) -> bool:
+        """是否有长任务正在推进（包括两个子 Run 之间的间隙）。"""
+        return any(not task.done() for task in self._loops.values())
+
     # 函数说明：MeaRunner.spawn
     # 用途：启动MeaRunner，供规划、执行、审计协作使用。
     # 参数：

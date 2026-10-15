@@ -59,6 +59,14 @@ class SandboxSupervisor:
         """清理上一次进程被强杀时遗留的沙箱，返回清理数量。"""
         return await self._native_backend.remove_orphans()
 
+    async def ensure_egress(self, config: SandboxConfig) -> None:
+        """带域名白名单的配置在启动沙箱前调用：确保出网代理在运行。"""
+        if config.allowed_domains:
+            await self._native_backend.ensure_egress(config.allowed_domains)
+
+    async def close(self) -> None:
+        await self._native_backend.close()
+
     # 函数说明：SandboxSupervisor.prepare_launch
     # 用途：根据工作目录和额外挂载生成沙箱启动参数。
     # 参数：

@@ -32,6 +32,7 @@ def build_builtin_tool_registry(
     *,
     search_settings: SearchSettings | None = None,
     sandbox_supervisor: SandboxSupervisor | None = None,
+    sandbox_allowed_domains: tuple[str, ...] = (),
 ) -> ToolRegistry:
 
     registry = ToolRegistry()
@@ -44,6 +45,7 @@ def build_builtin_tool_registry(
         ShellCommandTool(
             workspace_root,
             sandbox_supervisor=sandbox_supervisor,
+            allowed_domains=sandbox_allowed_domains,
         )
     )
     registry.register(HttpRequestTool())

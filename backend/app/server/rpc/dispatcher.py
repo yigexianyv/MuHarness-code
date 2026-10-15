@@ -8,7 +8,9 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
-from .protocol import JsonRpcError, RpcErrorCode
+from app.runtime.run.manager import RunStartBlocked
+
+from .protocol import INVALID_STATE, JsonRpcError, RpcErrorCode
 
 if TYPE_CHECKING:
     from app.application import Application
@@ -117,6 +119,9 @@ class RpcDispatcher:
             return await handler(params, ctx)
         except JsonRpcError:
             raise
+        except RunStartBlocked as exc:
+            # 例如工作区正在准备环境：原因直接展示给用户，不当成内部错误
+            raise JsonRpcError(INVALID_STATE, str(exc)) from exc
         except Exception as exc:
             logger.exception("rpc method %r failed", method)
             raise JsonRpcError(

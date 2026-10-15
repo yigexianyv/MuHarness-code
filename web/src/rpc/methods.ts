@@ -62,6 +62,9 @@ export const RpcMethods = {
   mcpAdd: 'mcp.add',
   mcpSetEnabled: 'mcp.set_enabled',
   mcpDelete: 'mcp.delete',
+  workspaceSetupStart: 'workspace.setup.start',
+  workspaceSetupStatus: 'workspace.setup.status',
+  workspaceSetupCancel: 'workspace.setup.cancel',
 } as const
 
 export type RpcMethodName = (typeof RpcMethods)[keyof typeof RpcMethods]
