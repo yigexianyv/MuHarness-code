@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,6 +24,7 @@ from app.runtime.mea.extra_tools import validate_extra_tools
 
 from .outcome import (
     OUTPUT_KEEP_CHARS,
+    ApprovalUse,
     ArtifactState,
     ContextStep,
     MeaState,
@@ -56,6 +59,7 @@ MAX_SNAPSHOT_FILE_BYTES = 256_000
 #   更新对象字段：`outcome.status`、`outcome.error`、`outcome.duration_seconds`。
 async def drive(stage: Stage, *, attempt: int) -> Outcome:
     outcome = Outcome(case_id=stage.case.id, variant=stage.variant.name, attempt=attempt)
+    outcome.initial_file_hashes = _snapshot_file_hashes(stage.paths.workspace)
     started = time.perf_counter()
     try:
         conversation = await stage.app.conversation_store.create(title=f"eval {stage.case.id}")
@@ -100,6 +104,7 @@ async def _drive_chat(stage: Stage, conversation_id: str, outcome: Outcome) -> N
             )
             outcome.conversations[turn.session] = created.id
         current_conversation_id = outcome.conversations[turn.session]
+        user_sequence = len(await stage.app.conversation_store.load_messages(current_conversation_id))
         dispatched = await stage.app.conversation_service.dispatch(
             conversation_id=current_conversation_id,
             content=turn.say,
@@ -111,10 +116,13 @@ async def _drive_chat(stage: Stage, conversation_id: str, outcome: Outcome) -> N
         tools = [
             ToolUse(
                 name=record.tool_call.name,
+                call_id=record.tool_call.id,
+                round_index=record.round_index,
                 arguments=record.tool_call.arguments,
                 success=record.result.success,
                 error=record.result.error,
                 output=(record.result.output or "")[:OUTPUT_KEEP_CHARS],
+                exit_code=_exit_code(record.result.output),
             )
             for record in result.tool_calls
         ]
@@ -123,10 +131,15 @@ async def _drive_chat(stage: Stage, conversation_id: str, outcome: Outcome) -> N
                 say=turn.say,
                 run_id=dispatched.run.id,
                 conversation_id=current_conversation_id,
+                user_sequence=user_sequence,
                 answer=result.final_message.content or "",
                 stop_reason=result.stop_reason.value,
                 steps=result.steps,
                 tools=tools,
+                received_tool_outputs=(
+                    await _received_tool_outputs(stage, dispatched.run.id, events, tools)
+                    if any("grounded_answer" in check for check in stage.case.checks) else []
+                ),
                 **_from_events(events),
             )
         )
@@ -164,6 +177,7 @@ async def _drain_post_run(stage: Stage) -> None:
 def _from_events(events: Sequence[AgentEvent]) -> dict[str, object]:
     context: list[ContextStep] = []
     approvals: list[str] = []
+    approval_calls: list[ApprovalUse] = []
     failed: list[str] = []
     reflection = Reflection()
     for event in events:
@@ -176,10 +190,15 @@ def _from_events(events: Sequence[AgentEvent]) -> dict[str, object]:
                     summary_updated=bool(event.summary_updated),
                     reached_target=event.reached_target,
                     prepared_input_tokens=event.prepared_input_tokens,
+                    summary_covered_after=event.summary_covered_after,
                 )
             )
         elif event.type is AgentEventType.TOOL_APPROVAL_COMPLETED and event.approval_decision:
             approvals.append(event.approval_decision.value)
+            if event.tool_call is not None:
+                approval_calls.append(ApprovalUse(
+                    call_id=event.tool_call.id, decision=event.approval_decision.value,
+                ))
         elif event.type is AgentEventType.AGENT_FAILED:
             failed.append(event.error.message if event.error else "agent_failed")
         elif event.type is AgentEventType.MEMORY_REFLECTION_COMPLETED:
@@ -196,6 +215,7 @@ def _from_events(events: Sequence[AgentEvent]) -> dict[str, object]:
     return {
         "context": context,
         "approvals": approvals,
+        "approval_calls": approval_calls,
         "failed_events": failed,
         "reflection": reflection,
         "chargeable_tokens": chargeable_tokens(usage),
@@ -290,6 +310,7 @@ async def _drive_mea(stage: Stage, conversation_id: str, outcome: Outcome) -> No
 async def _collect_state(stage: Stage, conversation_id: str, outcome: Outcome) -> None:
     app = stage.app
     outcome.files = _snapshot_text_files(stage.paths.workspace)
+    outcome.file_hashes = _snapshot_file_hashes(stage.paths.workspace)
     tasks = await app.task_store.list_for_conversation(conversation_id)
     outcome.tasks = [
         TaskState(
@@ -350,6 +371,54 @@ def _snapshot_text_files(workspace: Path) -> dict[str, str]:
         except UnicodeDecodeError:
             continue
     return files
+
+
+def _snapshot_file_hashes(workspace: Path) -> dict[str, str]:
+    """Hash actual bytes, including binary files and Windows line endings."""
+    return {
+        path.relative_to(workspace).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in workspace.rglob("*")
+        if path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_SNAPSHOT_FILE_BYTES
+    }
+
+
+def _exit_code(output: str | None) -> int | None:
+    try:
+        value = json.loads(output or "")
+    except ValueError:
+        return None
+    code = value.get("exit_code") if isinstance(value, dict) else None
+    return code if type(code) is int else None
+
+
+async def _received_tool_outputs(
+    stage: Stage, run_id: str, events: Sequence[AgentEvent], tools: list[ToolUse],
+) -> list[str]:
+    """Read existing final request views, never the evidence or executor preview."""
+    store = stage.app.run_step_store
+    if store is None:
+        return []
+    successful = {tool.call_id for tool in tools if tool.success}
+    outputs: dict[str, None] = {}
+    for event in events:
+        if event.type is not AgentEventType.MODEL_STARTED or event.step is None:
+            continue
+        for item in event.request_tool_views:
+            identifier = item.get("tool_call_id")
+            if identifier not in successful or not item.get("included"):
+                continue
+            view = await store.request_tool_view(run_id, event.step, identifier)
+            if not view or not view.get("included") or not isinstance(view.get("content"), str):
+                continue
+            try:
+                envelope = json.loads(view["content"])
+            except ValueError:
+                continue
+            if isinstance(envelope, dict) and envelope.get("success") is True:
+                output = envelope.get("output")
+                if isinstance(output, str):
+                    outputs[output] = None
+    return list(outputs)
 
 
 __all__ = ["drive"]

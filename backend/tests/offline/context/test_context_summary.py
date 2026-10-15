@@ -615,9 +615,9 @@ async def test_rolling_summary_uses_previous_summary_and_advances_coverage() -> 
     assert len(summary_messages) == 1
 
 
-# 函数说明：test_canonical_system_named_like_legacy_summary_is_preserved
+# 函数说明：test_canonical_system_named_like_summary_is_preserved
 # 用途：回归验证回归测试与测试辅助中的
-# `canonical_system_named_like_legacy_summary_is_preserved` 场景，下方断言说明列出实际通
+# `canonical_system_named_like_summary_is_preserved` 场景，下方断言说明列出实际通
 # 过条件。
 # 返回：类型 `None`；不返回结果值（隐式 None）。
 # 关键调用（按源码出现顺序，实际执行取决于分支）：`Message` → `ConversationSummaryState`
@@ -626,12 +626,12 @@ async def test_rolling_summary_uses_previous_summary_and_advances_coverage() -> 
 #   验证条件：`len(candidate) == 2`。
 #   验证条件：`candidate[0] == history[0]`。
 #   验证条件：`candidate[1].name == 'muharness_rolling_summary'`。
-def test_canonical_system_named_like_legacy_summary_is_preserved() -> None:
+def test_canonical_system_named_like_summary_is_preserved() -> None:
     history = (
         Message(
             role=MessageRole.SYSTEM,
-            name="vesta_rolling_summary",
-            content="旧版摘要",
+            name="muharness_rolling_summary",
+            content="历史摘要",
         ),
         Message(role=MessageRole.USER, content="旧问题"),
     )

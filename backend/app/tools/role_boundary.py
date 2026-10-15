@@ -24,6 +24,7 @@ EXECUTE_ALLOWED_TOOLS = frozenset(
         "read_file",
         "list_files",
         "write_file",
+        "edit_file",
         "artifact_publish",
         "artifact_list",
         "run_shell_command",

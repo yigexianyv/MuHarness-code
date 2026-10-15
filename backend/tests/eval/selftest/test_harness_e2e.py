@@ -240,7 +240,10 @@ async def test_mea_case_collects_rounds_steps_and_final_answer() -> None:
                 return answer("已写入 hello.py。")
             return call("write_file", path="hello.py", content='print("Hello MuHarness")\n')
         if prompt.startswith(AUDITOR_INSTRUCTIONS[:20]):
-            return answer(AUDIT_REPORT)
+            report = AUDIT_REPORT
+            if "审计范围:\n- 最终验收。" in prompt:
+                report = report.replace("步骤验收: satisfied", "步骤验收: not_applicable")
+            return answer(report)
         return answer("未识别的请求")
 
     case = Case.model_validate(

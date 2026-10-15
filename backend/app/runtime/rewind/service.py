@@ -58,7 +58,7 @@ READ_ONLY_TOOLS = frozenset(
     }
 )
 # 只改工作区文件：文件恢复已经覆盖
-FILE_TOOLS = frozenset({"write_file"})
+FILE_TOOLS = frozenset({"write_file", "edit_file"})
 _SHELL_TOOLS = frozenset({"run_shell_command"})
 
 _ARGUMENT_PREVIEW_CHARS = 160

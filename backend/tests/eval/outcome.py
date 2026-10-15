@@ -17,10 +17,20 @@ class ToolUse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    call_id: str | None = None
+    round_index: int | None = None
     arguments: dict[str, Any] | str = Field(default_factory=dict)
     success: bool
     error: str | None = None
     output: str | None = None  # 只保留前 OUTPUT_KEEP_CHARS 个字符
+    exit_code: int | None = None
+
+
+class ApprovalUse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str
+    decision: str
 
 
 class ContextStep(BaseModel):
@@ -34,6 +44,7 @@ class ContextStep(BaseModel):
     summary_updated: bool = False
     reached_target: bool | None = None
     prepared_input_tokens: int | None = None
+    summary_covered_after: int | None = None
 
 
 class Reflection(BaseModel):
@@ -51,12 +62,15 @@ class TurnOutcome(BaseModel):
     say: str
     run_id: str | None = None
     conversation_id: str | None = None
+    user_sequence: int | None = None
     answer: str = ""
     stop_reason: str | None = None
     steps: int = 0
     tools: list[ToolUse] = Field(default_factory=list)
     context: list[ContextStep] = Field(default_factory=list)
     approvals: list[str] = Field(default_factory=list)  # 每次审批的决定：approved / denied
+    approval_calls: list[ApprovalUse] = Field(default_factory=list)
+    received_tool_outputs: list[str] = Field(default_factory=list)
     reflection: Reflection = Field(default_factory=Reflection)
     chargeable_tokens: int = 0
     model_calls: int = 0
@@ -122,6 +136,8 @@ class Outcome(BaseModel):
     conversations: dict[str, str] = Field(default_factory=dict)
     turns: list[TurnOutcome] = Field(default_factory=list)
     files: dict[str, str] = Field(default_factory=dict)  # 结束时工作区里的文本文件
+    initial_file_hashes: dict[str, str] = Field(default_factory=dict)
+    file_hashes: dict[str, str] = Field(default_factory=dict)
     tasks: list[TaskState] = Field(default_factory=list)
     artifacts: list[ArtifactState] = Field(default_factory=list)
     memories: list[MemoryState] = Field(default_factory=list)

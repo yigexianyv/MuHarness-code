@@ -102,7 +102,9 @@ async def test_empty_reply_during_forced_finalization_keeps_truncation(
 
 @pytest.mark.asyncio
 async def test_repeated_truncated_empty_replies_keep_truncation() -> None:
-    registry, _ = fake_registry([_truncated_empty(), _truncated_empty()])
+    registry, _ = fake_registry(
+        [_truncated_empty(), _truncated_empty(), _truncated_empty()]
+    )
     result = await _runtime(registry).run("work")
     assert result.ok is False
     assert result.model_finish_reason == "max_tokens"

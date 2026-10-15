@@ -6,10 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.types import Message, MessageRole, ModelUsage
 
 SUMMARY_MESSAGE_NAME = "muharness_rolling_summary"
-PREVIOUS_SUMMARY_MESSAGE_NAME = "vesta_rolling_summary"
-SUMMARY_MESSAGE_NAMES = frozenset(
-    {SUMMARY_MESSAGE_NAME, PREVIOUS_SUMMARY_MESSAGE_NAME}
-)
+SUMMARY_MESSAGE_NAMES = frozenset({SUMMARY_MESSAGE_NAME})
 
 
 class RollingConversationSummary(BaseModel):

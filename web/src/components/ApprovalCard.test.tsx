@@ -39,6 +39,26 @@ describe('ApprovalCard', () => {
     expect(html).toContain('ls -la')
   })
 
+  it('准备脚本完整展示脚本和哈希，不放进折叠详情', () => {
+    const script = 'python -m venv --copies .venv\n.venv/bin/pip install -r requirements.txt\n'
+    const html = renderToStaticMarkup(
+      <ApprovalCard
+        approval={{
+          ...approval,
+          tool_name: 'workspace_setup',
+          arguments: { script_path: 'setup.sh', script, sha256: 'abcdef1234567890' },
+        }}
+        onApprove={() => {}}
+        onDeny={() => {}}
+      />,
+    )
+    expect(html).toContain('setup-script')
+    expect(html).toContain('pip install -r requirements.txt')
+    expect(html).toContain('abcdef123456')
+    expect(html).toContain('访问外网')
+    expect(html).not.toContain('查看技术详情')
+  })
+
   it('busy 时按钮禁用', () => {
     const html = renderToStaticMarkup(
       <ApprovalCard approval={approval} busy onApprove={() => {}} onDeny={() => {}} />,

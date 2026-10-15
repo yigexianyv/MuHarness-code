@@ -28,6 +28,10 @@ logger = logging.getLogger("muharness.run.manager")
 RunFinalizer = Callable[[str], Awaitable[object] | object]
 
 
+class RunStartBlocked(RuntimeError):
+    """当前不允许启动新 Run；消息直接展示给用户。"""
+
+
 class RunManager:
 
     # 函数说明：RunManager.__init__
@@ -50,8 +54,11 @@ class RunManager:
         runtime: AgentRuntime,
         approval_store: SQLiteApprovalStore | None = None,
         run_finalizers: Sequence[RunFinalizer] = (),
+        start_guard: Callable[[], str | None] | None = None,
     ) -> None:
         self._run_store = run_store
+        # 返回非空原因时拒绝启动新 Run，例如工作区正在准备环境
+        self._start_guard = start_guard
         self._checkpoint_store = checkpoint_store
         self._runtime = runtime
         self._approval_store = approval_store
@@ -179,6 +186,9 @@ class RunManager:
         绝不会启动第二次。``tool_context_metadata`` 是本次运行的可信内存上下文，
         会复制后传给工具；不会持久化到 Run。
         """
+        blocked = self._start_guard() if self._start_guard is not None else None
+        if blocked:
+            raise RunStartBlocked(blocked)
         run = await self._run_store.create(
             conversation_id=conversation_id,
             user_message=user_message,
@@ -595,4 +605,4 @@ class RunManager:
             self._active_tasks.pop(run_id, None)
 
 
-__all__ = ["RunManager"]
+__all__ = ["RunManager", "RunStartBlocked"]

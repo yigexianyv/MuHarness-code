@@ -241,6 +241,46 @@ def test_role_limits_replace_call_thresholds_only() -> None:
     assert budget.hard_tokens == 200_000
 
 
+# Executor 使用自己的 token 阈值（默认 300k/400k/500k），不沿用主对话的 80k/120k/160k；
+# Manager / Auditor 仍沿用主运行预算。阈值可用 MEA_EXECUTOR_*_TOKENS 覆盖。
+def test_executor_gets_own_token_thresholds() -> None:
+    from app.runtime.mea.runtimes import MeaSettings, role_limits
+
+    base = RunBudgetConfig(_env_file=None)
+    limits = role_limits(MeaSettings(_env_file=None))
+
+    executor = limits[AgentMode.EXECUTE].budget(base)
+    assert (
+        executor.warning_tokens,
+        executor.finalization_tokens,
+        executor.hard_tokens,
+    ) == (300_000, 400_000, 500_000)
+    assert (executor.warning_model_calls, executor.hard_model_calls) == (60, 80)
+    assert executor.finalization_model_calls == 70
+
+    for mode in (AgentMode.MANAGE, AgentMode.AUDIT):
+        other = limits[mode].budget(base)
+        assert (other.warning_tokens, other.finalization_tokens, other.hard_tokens) == (
+            base.warning_tokens,
+            base.finalization_tokens,
+            base.hard_tokens,
+        )
+
+    custom = role_limits(
+        MeaSettings(
+            _env_file=None,
+            executor_warning_tokens=150_000,
+            executor_finalization_tokens=200_000,
+            executor_hard_tokens=250_000,
+        )
+    )[AgentMode.EXECUTE].budget(base)
+    assert (custom.warning_tokens, custom.finalization_tokens, custom.hard_tokens) == (
+        150_000,
+        200_000,
+        250_000,
+    )
+
+
 # ---------------------------------------------------------------- 恢复记录
 
 

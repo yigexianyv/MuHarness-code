@@ -2,11 +2,12 @@ id: b17-memory-skip
 suite: behavior
 title: 一次性琐事不写入记忆
 why: 记忆写入门槛太低会让记忆库被琐事填满
-tags: [memory]
+tags: [memory, supplement-v2]
 timeout_seconds: 400
 turns:
-  - 我今天中午吃了一碗牛肉面，挺好吃的。
+  - 帮我算一下 123 乘以 456 等于多少。
 checks:
   - no_run_errors: true
+  - answer_number: 56088
   - memory_count: {max: 0}
   - core_memory_empty: true

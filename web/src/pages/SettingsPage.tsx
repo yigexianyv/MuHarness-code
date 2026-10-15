@@ -7,6 +7,7 @@ import { Icon } from '../components/Icon'
 import ModelSettingsPanel from '../components/ModelSettingsPanel'
 import { ErrorState } from '../components/PageStates'
 import { PageShell } from '../components/PageShell'
+import WorkspaceSetupPanel from '../components/WorkspaceSetupPanel'
 import { Button } from '../components/ui'
 
 export default function SettingsPage(): React.JSX.Element {
@@ -77,6 +78,8 @@ export default function SettingsPage(): React.JSX.Element {
                   </dl>
                 )}
               </section>
+
+              <WorkspaceSetupPanel />
 
               <section className="settings-group">
                 <header className="settings-group__header">

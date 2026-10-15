@@ -76,6 +76,7 @@ from app.model_settings import (
 from app.models.config import ModelSettings
 from app.models.registry import ModelAdapterRegistry
 from app.models.types import AgentMode, Message, MessageRole, ModelProvider
+from app.paths import preferred_env
 from app.records.evidence import (
     EvidenceRecorder,
     SQLiteEvidenceStore,
@@ -121,11 +122,13 @@ from app.runtime.run import (
     SQLiteRunMessageStore,
     SQLiteRunStore,
 )
+from app.runtime.workspace_setup import WorkspaceSetupService
 from app.safety.approval import (
     SQLiteApprovalStore,
     WebApprovalGate,
 )
-from app.safety.sandbox import SandboxSupervisor
+from app.safety.sandbox import SandboxConfig, SandboxNetworkMode, SandboxSupervisor
+from app.safety.sandbox.egress_proxy import normalize_domain_patterns
 from app.tools import (
     ConsoleApprovalGate,
     PermissionPolicyEngine,
@@ -228,6 +231,15 @@ def title_from_content(content: str) -> str:
 
     title = " ".join(content.split()).strip()
     return title[:40] or "新会话"
+
+
+def _sandbox_allowed_domains() -> tuple[str, ...]:
+    """Shell 沙箱可经代理访问的域名；未配置时 Shell 完全断网。配置有误直接报错。"""
+    raw = preferred_env("MUHARNESS_SANDBOX_ALLOWED_DOMAINS", "")
+    try:
+        return normalize_domain_patterns(raw.replace(",", " ").split())
+    except ValueError as exc:
+        raise ValueError(f"MUHARNESS_SANDBOX_ALLOWED_DOMAINS 配置有误：{exc}") from exc
 
 
 def _sandbox_instance_id(database: Path) -> str:
@@ -477,6 +489,8 @@ class Application:
         self.mea_runner: MeaRunner | None = None
         self.mea_runtimes: RoleRuntimes | None = None
         self.reconciled_meas: tuple[Any, ...] = ()
+        self.workspace_setup: WorkspaceSetupService | None = None
+        self.sandbox_supervisor: SandboxSupervisor | None = None
 
         self._started = False
         self._lifecycle_lock = asyncio.Lock()
@@ -561,9 +575,33 @@ class Application:
             await sandbox_supervisor.remove_orphans()
         except Exception:
             logger.exception("failed to remove orphaned sandbox containers")
+        self.sandbox_supervisor = sandbox_supervisor
+        sandbox_allowed_domains = _sandbox_allowed_domains()
+        if sandbox_allowed_domains:
+            # 提前拉起出网代理，第一条 Shell 命令不用等；失败不阻止启动，
+            # 每条命令执行前还会再确认一次，代理不可用时命令失败而不是直连
+            try:
+                await sandbox_supervisor.ensure_egress(
+                    SandboxConfig(
+                        network=SandboxNetworkMode.DENIED,
+                        allowed_domains=sandbox_allowed_domains,
+                    )
+                )
+            except Exception:
+                logger.exception("failed to start sandbox egress proxy")
         tool_registry = build_builtin_tool_registry(
             self.workspace_root,
             sandbox_supervisor=sandbox_supervisor,
+            sandbox_allowed_domains=sandbox_allowed_domains,
+        )
+        # 用基础审批入口，不用长任务的沙箱自动批准包装：准备脚本每次都要人工确认
+        workspace_setup = WorkspaceSetupService(
+            self.workspace_root,
+            supervisor=sandbox_supervisor,
+            approval_gate=approval_gate,
+            approval_store=approval_store,
+            state_dir=database.parent / "workspace_setup",
+            shell_allowed_domains=sandbox_allowed_domains,
         )
 
         artifact_store = SQLiteArtifactStore(database)
@@ -737,6 +775,7 @@ class Application:
             constraints_provider=conversation_store.constraints_for_request,
             run_step_store=run_step_store,
             workspace_snapshots=workspace_snapshots,
+            environment_note=workspace_setup.context_message,
         )
 
         run_store = SQLiteRunStore(database)
@@ -745,6 +784,7 @@ class Application:
             checkpoint_store,
             runtime,
             approval_store=approval_store,
+            start_guard=workspace_setup.run_block_reason,
         )
         reconciled_runs = await run_manager.initialize()
         active_run_ids = {
@@ -814,6 +854,12 @@ class Application:
                 skill_store=skill_store if executor else None,
                 skill_context_provider=skill_context_provider if executor else None,
                 run_budget_config=limits.budget(self._run_budget_config),
+                # 会执行 Shell 的角色需要知道依赖在哪
+                environment_note=(
+                    workspace_setup.context_message
+                    if mode in (AgentMode.EXECUTE, AgentMode.AUDIT)
+                    else None
+                ),
             )
 
         # 角色的单次输出按模型能力上限封顶；显式传入的 max_output_tokens 仍然优先
@@ -988,9 +1034,18 @@ class Application:
         self.mea_runner = mea_runner
         self.mea_runtimes = mea_runtimes
         self.reconciled_meas = reconciled_meas
+        self.workspace_setup = workspace_setup
 
         self._started = True
         await automation_scheduler.start()
+
+    def workspace_busy_reason(self) -> str | None:
+        """准备环境前检查：有 Run 或长任务在跑时不能准备，避免它们用到装了一半的依赖。"""
+        if self.run_manager is not None and self.run_manager.active_run_ids:
+            return "有正在执行的 Run，请等待完成或取消后再准备环境"
+        if self.mea_runner is not None and self.mea_runner.has_active_loops:
+            return "有正在推进的长任务，请先暂停后再准备环境"
+        return None
 
     # 函数说明：Application.close
     # 用途：按逆向依赖顺序关闭后台任务、连接与持久化资源。
@@ -1012,6 +1067,8 @@ class Application:
     async def _close(self) -> None:
         if not self._started:
             return
+        if self.workspace_setup is not None:
+            await self.workspace_setup.cancel()
         if self.mea_runner is not None:
             await self.mea_runner.shutdown()
         if self.automation_scheduler is not None:
@@ -1029,4 +1086,6 @@ class Application:
             await self.memory_embedding_adapter.close()
             self.memory_embedding_adapter = None
         await self.registry.close()
+        if self.sandbox_supervisor is not None:
+            await self.sandbox_supervisor.close()
         self._started = False

@@ -49,10 +49,9 @@ def default_database_path(backend_root: Path | None = None) -> Path:
 
 
 # 函数说明：preferred_env
-# 用途：按新环境变量、旧别名、环境文件和默认值的顺序选择非空配置。
+# 用途：按环境变量、环境文件和默认值的顺序选择非空配置。
 # 参数：
 #   name：目标对象、工具或配置项名称，类型 `str`。
-#   previous_name：兼容旧配置使用的环境变量名称，类型 `str`。
 #   default：未提供有效值时使用的默认值，类型 `str`。
 #   env_file：备用环境配置文件路径；省略时使用后端环境文件，类型 `Path | None`；默认
 # `None`。
@@ -62,20 +61,19 @@ def default_database_path(backend_root: Path | None = None) -> Path:
 #   当 `candidate and candidate.strip()` 时，返回 `candidate.strip()`。
 def preferred_env(
     name: str,
-    previous_name: str,
     default: str,
     *,
     env_file: Path | None = None,
 ) -> str:
 
-    for candidate in (os.environ.get(name), os.environ.get(previous_name)):
-        if candidate and candidate.strip():
-            return candidate.strip()
+    candidate = os.environ.get(name)
+    if candidate and candidate.strip():
+        return candidate.strip()
 
     settings = dotenv_values(env_file or _BACKEND_ENV_FILE)
-    for candidate in (settings.get(name), settings.get(previous_name)):
-        if candidate and candidate.strip():
-            return candidate.strip()
+    candidate = settings.get(name)
+    if candidate and candidate.strip():
+        return candidate.strip()
     return default
 
 

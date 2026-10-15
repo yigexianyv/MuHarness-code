@@ -9,6 +9,7 @@ import {
   listApprovals,
 } from '../api/approvals'
 import type { ApprovalRequest, ApprovalStatus } from '../api/types'
+import ApprovalCard from '../components/ApprovalCard'
 import { ErrorState, LoadingState } from '../components/PageStates'
 import { Badge, Button } from '../components/ui'
 import { rpcClient } from '../rpc'
@@ -52,6 +53,10 @@ export function ApprovalItem({
   onApprove: (id: string) => void
   onDeny: (id: string) => void
 }): React.JSX.Element {
+  // 环境准备脚本会联网执行：待处理时用完整展示脚本的卡片，不能只给折叠的参数
+  if (approval.tool_name === 'workspace_setup' && approval.status === 'pending') {
+    return <ApprovalCard approval={approval} busy={busy} onApprove={onApprove} onDeny={onDeny} />
+  }
   return (
     <div className="approval-card">
       <div className="approval-card__heading">

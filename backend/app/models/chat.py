@@ -44,6 +44,11 @@ from app.runtime.agent.events import (
 )
 from app.runtime.checkpoint import RunCheckpoint
 from app.runtime.run import Run, RunStatus
+from app.runtime.workspace_setup import (
+    WorkspaceSetupBusy,
+    WorkspaceSetupError,
+    WorkspaceSetupRecord,
+)
 from app.tools import (
     ApprovalScope,
     PermissionRule,
@@ -90,10 +95,56 @@ _HELP_TEXT = (
     "  /permission remove <规则ID> 删除一条审批规则\n"
     "  /permissions clear 清除当前会话的全部审批规则\n"
     "\n系统\n"
+    "  /env 查看工作区环境准备状态\n"
+    "  /env-setup [脚本路径] 审批后在联网容器中执行准备脚本（默认 setup.sh）\n"
     "  /setup 查看模型设置入口\n"
     "  /help 查看全部命令\n"
     "  /exit 退出聊天"
 )
+
+
+async def _workspace_setup_command(app: Application, content: str) -> None:
+    """/env 查看最近一次准备结果；/env-setup 审批后执行准备脚本并等待完成。"""
+    service = app.workspace_setup
+    if service is None:
+        print("工作区环境准备不可用")
+        return
+    if content == "/env":
+        record = service.last
+        if record is None:
+            print("还没有准备过工作区环境")
+            return
+        _print_workspace_setup(record)
+        return
+    script_path = content.removeprefix("/env-setup").strip() or "setup.sh"
+    try:
+        service.start(script_path, busy_reason=app.workspace_busy_reason())
+    except (WorkspaceSetupBusy, WorkspaceSetupError) as exc:
+        print(exc)
+        return
+    print("请在下方确认是否允许执行准备脚本（会联网）。")
+    record = await service.wait()
+    if record is not None:
+        _print_workspace_setup(record)
+
+
+def _print_workspace_setup(record: WorkspaceSetupRecord) -> None:
+    print(f"准备 {record.id} · {record.status.value} · 脚本 {record.script_path}")
+    print(f"  sha256: {record.script_sha256}")
+    if record.exit_code is not None:
+        print(f"  退出码: {record.exit_code}{'（超时）' if record.timed_out else ''}")
+    checks = (
+        ("网络隔离", record.network_check),
+        ("环境验证", record.environment_check),
+    )
+    for label, check in checks:
+        if check is not None:
+            state = "跳过" if check.passed is None else ("通过" if check.passed else "未通过")
+            print(f"  {label}: {state} · {check.detail}")
+    if record.error:
+        print(f"  错误: {record.error}")
+    if record.log_path:
+        print(f"  日志: {record.log_path}")
 
 
 # 函数说明：_initial_history
@@ -1247,6 +1298,9 @@ async def _run(
                 )
                 await summary_store.delete(conversation.id)
                 print("上下文已清空。")
+                continue
+            if content == "/env" or content.startswith("/env-setup"):
+                await _workspace_setup_command(app, content)
                 continue
             if content == "/setup":
                 print("模型设置在下次启动时生效。请退出后运行：")

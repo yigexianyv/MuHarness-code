@@ -141,6 +141,8 @@ def _excerpt(text: str | None) -> str:
 # 关键调用（按源码出现顺序，实际执行取决于分支）：`_excerpt` → `_arguments`。
 def _completed_line(result: ToolResult, call: ToolCall | None) -> str:
     outcome = "成功" if result.success else f"失败: {_excerpt(result.error)}"
+    if not result.success and result.execution_outcome == "unknown":
+        outcome = f"执行结果未知（需核查副作用，勿盲目重试）: {_excerpt(result.error)}"
     evidence = f"（evidence: {result.evidence_id}）" if result.evidence_id else ""
     return f"- {result.tool_name} {_arguments(call)} → {outcome}{evidence}"
 

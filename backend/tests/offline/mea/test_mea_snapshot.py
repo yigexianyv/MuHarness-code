@@ -153,20 +153,20 @@ def test_type_change_is_reported(tmp_path: Path) -> None:
 #   tmp_path：pytest 提供的隔离临时目录，类型 `Path`。
 # 返回：类型 `None`；不返回结果值（隐式 None）。
 # 关键调用（按源码出现顺序，实际执行取决于分支）：`_workspace` →
-# `(root / '.vesta').mkdir` → `snapshot_workspace` →
-# `(root / '.vesta' / 'log.txt').write_text` → `snapshot_diff`。
+# `(root / '.muharness').mkdir` → `snapshot_workspace` →
+# `(root / '.muharness' / 'log.txt').write_text` → `snapshot_diff`。
 # 分支与异常：
 #   验证条件：`not diff.mutated`。
 # 副作用与资源：
-#   文件或资源访问：`(root / '.vesta').mkdir`、
-# `(root / '.vesta' / 'log.txt').write_text`。
+#   文件或资源访问：`(root / '.muharness').mkdir`、
+# `(root / '.muharness' / 'log.txt').write_text`。
 def test_excluded_paths_are_ignored(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
-    (root / ".vesta").mkdir()
-    before = snapshot_workspace(root, exclude=[".vesta"])
-    (root / ".vesta" / "log.txt").write_text("harness log", encoding="utf-8")
+    (root / ".muharness").mkdir()
+    before = snapshot_workspace(root, exclude=[".muharness"])
+    (root / ".muharness" / "log.txt").write_text("harness log", encoding="utf-8")
 
-    diff = snapshot_diff(before, snapshot_workspace(root, exclude=[root / ".vesta"]))
+    diff = snapshot_diff(before, snapshot_workspace(root, exclude=[root / ".muharness"]))
     assert not diff.mutated
 
 

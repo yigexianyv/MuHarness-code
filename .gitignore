@@ -83,7 +83,6 @@ docs/
 
 # 运行数据与工作文件
 .muharness/
-.vesta/
 .oneagent/
 output/
 *.log

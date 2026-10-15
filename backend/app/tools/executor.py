@@ -6,7 +6,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import replace
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 from app.models.types import AgentMode, ToolCall, ToolResult
 
@@ -380,18 +380,21 @@ class ToolExecutor:
                 tool_call,
                 f"Tool timed out after {timeout_seconds:g} seconds.",
                 started_at,
+                execution_outcome="unknown",
             )
         except (KeyError, TypeError, ValueError) as exc:
             return self._failure(
                 tool_call,
                 f"Invalid arguments: {exc}",
                 started_at,
+                execution_outcome="unknown",
             )
         except Exception as exc:
             return self._failure(
                 tool_call,
                 f"Tool execution failed: {type(exc).__name__}: {exc}",
                 started_at,
+                execution_outcome="unknown",
             )
 
         serialized_output = _serialize_output(output)
@@ -445,7 +448,10 @@ class ToolExecutor:
         tool_call: ToolCall,
         error: str,
         started_at: float,
+        *,
+        execution_outcome: Literal["not_started", "unknown"] = "not_started",
     ) -> ToolResult:
+        """失败结果携带执行阶段；调用已开始时不承诺副作用未发生。"""
         return ToolResult(
             tool_call_id=tool_call.id,
             tool_name=tool_call.name,
@@ -453,6 +459,15 @@ class ToolExecutor:
             output=None,
             error=error,
             duration_ms=_duration_ms(started_at),
+            execution_outcome=execution_outcome,
+            retry_advice=(
+                "Execution started, but its final effects are unknown. "
+                "Do not blindly repeat this operation. Verify its state first; "
+                "retry only after confirming it is safe or idempotent."
+                if execution_outcome == "unknown"
+                else "The tool body was not invoked. Fix the reported error "
+                "or obtain authorization before trying again."
+            ),
         )
 
     # 函数说明：ToolExecutor._complete

@@ -32,6 +32,10 @@ class ApprovalResponse(BaseModel):
     scope: ApprovalScope = ApprovalScope.ONCE
 
 
+# 工作区准备脚本的审批：不是模型可调用的工具，只用这个名字在审批界面里区分展示
+WORKSPACE_SETUP_TOOL_NAME = "workspace_setup"
+
+
 @dataclass(frozen=True)
 class ApprovalRequest:
 
@@ -49,6 +53,19 @@ class ApprovalRequest:
     # 返回：类型 `str`；返回 `'\n'.join(lines)`。
     # 关键调用（按源码出现顺序，实际执行取决于分支）：`json.dumps`。
     def summary(self, *, max_arguments: int = 500) -> str:
+        if self.tool_name == WORKSPACE_SETUP_TOOL_NAME:
+            # 准备脚本会联网执行，必须完整展示，不能截断后让用户批准
+            return "\n".join(
+                [
+                    "操作: 在联网容器中执行工作区准备脚本",
+                    f"说明: {self.description or '(无)'}",
+                    f"脚本: {self.arguments.get('script_path')}",
+                    f"SHA-256: {self.arguments.get('sha256')}",
+                    "----- 脚本全文 -----",
+                    str(self.arguments.get("script", "")),
+                    "----- 脚本结束 -----",
+                ]
+            )
         serialized = json.dumps(
             self.arguments,
             ensure_ascii=False,
@@ -176,6 +193,7 @@ class ConsoleApprovalGate(ApprovalGate):
 
 
 __all__ = [
+    "WORKSPACE_SETUP_TOOL_NAME",
     "ApprovalDecision",
     "ApprovalGate",
     "ApprovalRequest",

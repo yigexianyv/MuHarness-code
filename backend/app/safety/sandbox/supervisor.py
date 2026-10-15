@@ -22,9 +22,7 @@ from .models import (
 _PROTECTED_RELATIVE_PATHS = (
     ".git",
     ".muharness",
-    ".vesta",
     "backend/.muharness",
-    "backend/.vesta",
     ".env",
     "backend/.env",
 )
@@ -60,6 +58,14 @@ class SandboxSupervisor:
     async def remove_orphans(self) -> int:
         """清理上一次进程被强杀时遗留的沙箱，返回清理数量。"""
         return await self._native_backend.remove_orphans()
+
+    async def ensure_egress(self, config: SandboxConfig) -> None:
+        """带域名白名单的配置在启动沙箱前调用：确保出网代理在运行。"""
+        if config.allowed_domains:
+            await self._native_backend.ensure_egress(config.allowed_domains)
+
+    async def close(self) -> None:
+        await self._native_backend.close()
 
     # 函数说明：SandboxSupervisor.prepare_launch
     # 用途：根据工作目录和额外挂载生成沙箱启动参数。
@@ -219,7 +225,7 @@ class SandboxSupervisor:
 
 # 函数说明：_platform_backend
 # 用途：在隔离执行与沙箱生命周期中处理 `_platform_backend`，通过 `preferred_env('
-# MUHARNESS_SANDBOX_BACKEND', 'VESTA_SANDBOX_BACKEND', 'auto').strip().…` 完成首个内部处
+# MUHARNESS_SANDBOX_BACKEND', 'auto').strip().…` 完成首个内部处
 # 理步骤。
 # 参数：
 #   workspace_root：文件工具允许访问的工作区根目录，类型 `Path`。
@@ -228,7 +234,7 @@ class SandboxSupervisor:
 # `DockerSandboxBackend(workspace_root)`；`UnsupportedSandboxBackend('docker disabled')`
 # 。
 # 关键调用（按源码出现顺序，实际执行取决于分支）：
-# `preferred_env('MUHARNESS_SANDBOX_BACKEND', 'VESTA_SANDBOX_BACKEND', 'auto'…` →
+# `preferred_env('MUHARNESS_SANDBOX_BACKEND', 'auto'…` →
 # `preferred_env` → `UnsupportedSandboxBackend` → `DockerSandboxBackend`。
 # 分支与异常：
 #   当 `requested not in {'auto', 'docker', 'unsupported'}` 时，返回
@@ -241,7 +247,7 @@ def _platform_backend(
     instance_id: str | None = None,
 ) -> SandboxBackend:
     requested = preferred_env(
-        "MUHARNESS_SANDBOX_BACKEND", "VESTA_SANDBOX_BACKEND", "auto"
+        "MUHARNESS_SANDBOX_BACKEND", "auto"
     ).strip().lower()
     if requested not in {"auto", "docker", "unsupported"}:
         return UnsupportedSandboxBackend(

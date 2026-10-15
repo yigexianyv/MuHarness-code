@@ -6,6 +6,12 @@ import subprocess
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_sandbox_egress(monkeypatch):
+    """离线测试不读开发者 .env 里的出网白名单，避免启动应用时拉起真实代理容器。"""
+    monkeypatch.setattr("app.application._sandbox_allowed_domains", lambda: ())
+
+
 # 函数说明：docker_engine
 # 用途：在回归测试与测试辅助中处理 `docker_engine`，通过 `shutil.which` 完成首个内部处理
 # 步骤。

@@ -47,7 +47,7 @@ def test_runtime_resources_always_use_current_directory(tmp_path) -> None:
 #   tmp_path：pytest 提供的隔离临时目录。
 # 返回：类型 `None`；不返回结果值（隐式 None）。
 # 关键调用（按源码出现顺序，实际执行取决于分支）：`alternate.mkdir` →
-# `(alternate / 'vesta.db').touch` → `(alternate / 'tasks').mkdir` →
+# `(alternate / 'other.db').touch` → `(alternate / 'tasks').mkdir` →
 # `(alternate / 'memory').mkdir` → `(alternate / 'settings').mkdir` →
 # `(alternate / 'settings' / 'models.json').touch`；另有 3 个调用点。
 # 分支与异常：
@@ -60,9 +60,9 @@ def test_runtime_resources_always_use_current_directory(tmp_path) -> None:
 #   文件或资源访问：`alternate.mkdir`、`(alternate / 'tasks').mkdir`、
 # `(alternate / 'memory').mkdir`、`(alternate / 'settings').mkdir`。
 def test_other_resource_directories_are_not_selected(tmp_path) -> None:
-    alternate = tmp_path / ".vesta"
+    alternate = tmp_path / ".other-app"
     alternate.mkdir()
-    (alternate / "vesta.db").touch()
+    (alternate / "other.db").touch()
     (alternate / "tasks").mkdir()
     (alternate / "memory").mkdir()
     (alternate / "settings").mkdir()
@@ -82,15 +82,15 @@ def test_other_resource_directories_are_not_selected(tmp_path) -> None:
 #   tmp_path：pytest 提供的隔离临时目录。
 # 返回：类型 `None`；不返回结果值（隐式 None）。
 # 关键调用（按源码出现顺序，实际执行取决于分支）：
-# `(tmp_path / '.vesta' / 'skills').mkdir` → `user_data_path` → `current_skills.exists`
+# `(tmp_path / '.other-app' / 'skills').mkdir` → `user_data_path` → `current_skills.exists`
 # → `current_skills.mkdir`。
 # 分支与异常：
 #   验证条件：`user_data_path('skills', home=tmp_path) == current_skills`。
 #   验证条件：`not current_skills.exists()`。
 # 副作用与资源：
-#   文件或资源访问：`(tmp_path / '.vesta' / 'skills').mkdir`、`current_skills.mkdir`。
+#   文件或资源访问：`(tmp_path / '.other-app' / 'skills').mkdir`、`current_skills.mkdir`。
 def test_user_skills_always_use_current_directory(tmp_path) -> None:
-    (tmp_path / ".vesta" / "skills").mkdir(parents=True)
+    (tmp_path / ".other-app" / "skills").mkdir(parents=True)
     current_skills = tmp_path / ".muharness" / "skills"
     assert user_data_path("skills", home=tmp_path) == current_skills
     assert not current_skills.exists()
@@ -108,42 +108,28 @@ def test_user_skills_always_use_current_directory(tmp_path) -> None:
 # 关键调用（按源码出现顺序，实际执行取决于分支）：`env_file.write_text` →
 # `monkeypatch.delenv` → `preferred_env` → `monkeypatch.setenv`。
 # 分支与异常：
-#   验证条件：`preferred_env('MUHARNESS_SANDBOX_IMAGE', 'VESTA_SANDBOX_IMAGE', 'default-
+#   验证条件：`preferred_env('MUHARNESS_SANDBOX_IMAGE', 'default-
 # image', env_file=env_file) == 'file-new'`。
-#   验证条件：`preferred_env('MUHARNESS_SANDBOX_IMAGE', 'VESTA_SANDBOX_IMAGE', 'default-
-# image', env_file=env_file) == 'process-old'`。
-#   验证条件：`preferred_env('MUHARNESS_SANDBOX_IMAGE', 'VESTA_SANDBOX_IMAGE', 'default-
+#   验证条件：`preferred_env('MUHARNESS_SANDBOX_IMAGE', 'default-
 # image', env_file=env_file) == 'process-new'`。
 # 副作用与资源：
 #   文件或资源访问：`env_file.write_text`。
 def test_environment_precedence_and_blank_fallback(monkeypatch, tmp_path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "MUHARNESS_SANDBOX_IMAGE=file-new\n"
-        "VESTA_SANDBOX_IMAGE=file-old\n",
+        "MUHARNESS_SANDBOX_IMAGE=file-new\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("MUHARNESS_SANDBOX_IMAGE", raising=False)
-    monkeypatch.delenv("VESTA_SANDBOX_IMAGE", raising=False)
     assert preferred_env(
         "MUHARNESS_SANDBOX_IMAGE",
-        "VESTA_SANDBOX_IMAGE",
         "default-image",
         env_file=env_file,
     ) == "file-new"
 
-    monkeypatch.setenv("VESTA_SANDBOX_IMAGE", "process-old")
-    assert preferred_env(
-        "MUHARNESS_SANDBOX_IMAGE",
-        "VESTA_SANDBOX_IMAGE",
-        "default-image",
-        env_file=env_file,
-    ) == "process-old"
-
     monkeypatch.setenv("MUHARNESS_SANDBOX_IMAGE", "process-new")
     assert preferred_env(
         "MUHARNESS_SANDBOX_IMAGE",
-        "VESTA_SANDBOX_IMAGE",
         "default-image",
         env_file=env_file,
     ) == "process-new"
@@ -151,19 +137,17 @@ def test_environment_precedence_and_blank_fallback(monkeypatch, tmp_path) -> Non
     monkeypatch.setenv("MUHARNESS_SANDBOX_IMAGE", "   ")
     assert preferred_env(
         "MUHARNESS_SANDBOX_IMAGE",
-        "VESTA_SANDBOX_IMAGE",
         "default-image",
         env_file=env_file,
-    ) == "process-old"
+    ) == "file-new"
 
-    monkeypatch.delenv("VESTA_SANDBOX_IMAGE")
+    monkeypatch.delenv("MUHARNESS_SANDBOX_IMAGE")
     env_file.write_text(
-        "MUHARNESS_SANDBOX_IMAGE= \nVESTA_SANDBOX_IMAGE=file-old\n",
+        "MUHARNESS_SANDBOX_IMAGE= \n",
         encoding="utf-8",
     )
     assert preferred_env(
         "MUHARNESS_SANDBOX_IMAGE",
-        "VESTA_SANDBOX_IMAGE",
         "default-image",
         env_file=env_file,
-    ) == "file-old"
+    ) == "default-image"

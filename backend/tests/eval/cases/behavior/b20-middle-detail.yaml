@@ -1,0 +1,18 @@
+id: b20-middle-detail
+suite: behavior
+title: 超长日志中间事实必须来自实际请求内容
+why: 原文存在证据库不代表模型已经读到，避免仅答对就误判找回成功
+tags: [tools, context, supplement-v2]
+timeout_seconds: 600
+setup:
+  files:
+    logs/app.log:
+      line: INFO request ok
+      lines: 3000
+      insert: {1500: "ERROR order=A7731 code=E4721 disk full"}
+turns:
+  - 读取 logs/app.log，告诉我那条 ERROR 的错误码和订单号，必须依据实际读取结果。
+checks:
+  - no_run_errors: true
+  - tool_used: {name: read_file, success: true}
+  - grounded_answer: {all: [E4721, A7731]}

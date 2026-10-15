@@ -15,6 +15,7 @@ from . import (
     system,
     tasks,
     trace,
+    workspace,
 )
 
 
@@ -39,6 +40,7 @@ def build_dispatcher() -> RpcDispatcher:
     memories.register(dispatcher)
     extensions.register(dispatcher)
     model_settings.register(dispatcher)
+    workspace.register(dispatcher)
     return dispatcher
 
 

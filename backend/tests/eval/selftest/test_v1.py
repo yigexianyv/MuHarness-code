@@ -327,7 +327,10 @@ async def test_mea_exports_child_events_and_all_usage(tmp_path):
                 )
             )
         if prompt.startswith(AUDITOR_INSTRUCTIONS[:20]):
-            return answer(AUDIT_REPORT)
+            report = AUDIT_REPORT
+            if "审计范围:\n- 最终验收。" in prompt:
+                report = report.replace("步骤验收: satisfied", "步骤验收: not_applicable")
+            return answer(report)
         return answer("未识别")
 
     case = Case(

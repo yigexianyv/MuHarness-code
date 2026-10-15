@@ -5,29 +5,33 @@ why: 滚动摘要丢掉用户早先给出的关键数字
 tags:
 - context
 - summary
+- supplement-v2
 timeout_seconds: 900
 env:
-  CONTEXT_MAX_UNSUMMARIZED_CONVERSATION_BLOCKS: '4'
-  CONTEXT_KEEP_RECENT_CONVERSATION_BLOCKS: '2'
+  CONTEXT_PREFERRED_INPUT_TOKENS: '20000'
+  CONTEXT_COMPACT_INPUT_TOKENS: '16000'
+  CONTEXT_KEEP_RECENT_CONVERSATION_BLOCKS: '1'
+setup:
+  files:
+    docs/a.md: {line: "资料A 第{i}行：无关背景内容，仅用于模拟上下文压力。", lines: 600}
+    docs/b.md: {line: "资料B 第{i}行：无关背景内容，仅用于模拟上下文压力。", lines: 600}
+    docs/c.md: {line: "资料C 第{i}行：无关背景内容，仅用于模拟上下文压力。", lines: 600}
 turns:
-- 先记一下项目信息：项目代号 AURORA，截止日期 11 月 3 日，预算 4.2 万元。回复“收到”就行。
-- 用一句话解释什么是 CAP 定理。
-- 用一句话解释什么是幂等。
-- 用一句话解释什么是乐观锁。
-- 用一句话解释什么是背压。
-- 用一句话解释什么是雪崩效应。
-- 用一句话解释什么是灰度发布。
-- 回到最开始：项目代号、截止日期和预算分别是多少？
+- 项目的内部代号是青鸟-27，交付日期是 11 月 18 日。回复“收到”即可。
+- 读取 docs/a.md，用一句话总结。
+- 读取 docs/b.md，用一句话总结。
+- 读取 docs/c.md，用一句话总结。
+- 回到最开始：项目内部代号和交付日期是什么？
 checks:
 - no_run_errors: true
 - summary_updated: true
+- summary_covers_turn: 1
 - answer_has:
     all:
-    - AURORA
-    - '4.2'
+    - 青鸟-27
 - answer_has:
     any:
-    - 11 月 3
-    - 11月3
-    - 11月 3
-    - 11 月3
+    - 11 月 18 日
+    - 11月18日
+    - 11月 18 日
+    - 11 月18日

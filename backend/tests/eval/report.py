@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import statistics
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,18 @@ from .outcome import Outcome
 from .spec import Case
 
 REPORT_FORMAT = 1
+
+
+def _write_atomic(path: Path, content: str) -> None:
+    pending: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            pending = Path(stream.name)
+            stream.write(content)
+        pending.replace(path)
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
 
 
 class AttemptRecord(BaseModel):
@@ -71,8 +84,8 @@ class RunReport(BaseModel):
         base = directory / f"{stamp}-{self.variant}"
         json_path = base.with_suffix(".json")
         md_path = base.with_suffix(".md")
-        json_path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
-        md_path.write_text(render_run(self), encoding="utf-8")
+        _write_atomic(json_path, self.model_dump_json(indent=2))
+        _write_atomic(md_path, render_run(self))
         return json_path, md_path
 
     # 函数说明：RunReport.load

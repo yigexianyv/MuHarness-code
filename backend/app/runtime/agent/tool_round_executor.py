@@ -242,6 +242,7 @@ class ToolRoundExecutor:
                 success=False,
                 error=rejection,
                 duration_ms=0,
+                execution_outcome="not_started",
             )
             await hook.after_execute(context, result)
             return result
@@ -258,6 +259,11 @@ class ToolRoundExecutor:
                 success=False,
                 error=f"{type(exc).__name__}: {exc}",
                 duration_ms=0.0,
+                execution_outcome="unknown",
+                retry_advice=(
+                    "Execution effects could not be confirmed. Verify state "
+                    "before repeating a potentially side-effecting operation."
+                ),
             )
             await hook.after_execute(context, result)
             return result
