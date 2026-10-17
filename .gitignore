@@ -4,6 +4,8 @@
 !/.gitattributes
 !/.dockerignore
 !/evaluate.ps1
+!/swebench.ps1
+!/swebench-one.ps1
 !/LICENSE*
 !/NOTICE*
 !/backend/
@@ -122,3 +124,4 @@ Desktop.ini
 !/NOTICE*
 !/backend/.env.example
 !/workspace/.gitkeep
+!/backend/tests/eval/swebench/README.md

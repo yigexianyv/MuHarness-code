@@ -1,0 +1,17 @@
+{
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
+  "base_url": "https://api.deepseek.com",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "temperature": 0,
+  "max_output_tokens": 8192,
+  "extra_body": {},
+  "model_timeout_seconds": 120,
+  "model_calls": 100,
+  "command_timeout_seconds": 120,
+  "task_timeout_seconds": 1800,
+  "hard_tokens": 3000000,
+  "context": {},
+  "transient_retries": 2,
+  "retry_backoff_seconds": 5
+}
